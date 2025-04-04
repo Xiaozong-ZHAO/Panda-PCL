@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0.2)
-project(cw2_team_x) # change your team name here!
+project(cw2_team_35) # change your team name here!
 
 ## Compile as C++11, supported in ROS Kinetic and newer
 # add_compile_options(-std=c++11)
@@ -109,10 +109,19 @@ generate_messages(
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-#  INCLUDE_DIRS include
-#  LIBRARIES move_panda
- CATKIN_DEPENDS message_runtime cw2_world_spawner
-#  DEPENDS system_lib
+  INCLUDE_DIRS include
+  LIBRARIES ${PROJECT_NAME}_cw2_class_lib
+  CATKIN_DEPENDS
+    roscpp
+    std_msgs
+    geometry_msgs
+    tf2
+    tf2_ros
+    moveit_ros_planning
+    moveit_ros_planning_interface
+    cw2_world_spawner
+  DEPENDS
+    PCL
 )
 
 ###########
@@ -165,6 +174,10 @@ target_link_libraries(cw2_solution_node
   ${PCL_INCLUDE_DIRS}
 )
 
+target_link_libraries(${PROJECT_NAME}_cw2_class_lib
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
 #############
 ## Install ##
 #############

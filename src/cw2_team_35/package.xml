@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>cw2_team_x</name> <!-- change your team name here! -->
+  <name>cw2_team_35</name> <!-- change your team name here! -->
   <version>0.0.0</version>
   <description>
   A package template for the cw2 solution. The name should be changed to the team 
@@ -54,10 +54,12 @@
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>roscpp</build_depend>
   <build_depend>std_msgs</build_depend>
+  <build_depend>moveit_ros_planning</build_depend>
   <build_export_depend>roscpp</build_export_depend>
   <build_export_depend>std_msgs</build_export_depend>
   <exec_depend>roscpp</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>moveit_ros_planning</exec_depend>
 
   <depend>moveit_core</depend>
   <depend>moveit_ros_planning_interface</depend>
