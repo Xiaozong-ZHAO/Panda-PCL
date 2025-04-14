@@ -6,6 +6,9 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <geometry_msgs/PointStamped.h>
 #include <ros/package.h>
+#include <visualization_msgs/Marker.h>
+#include <unordered_set>
+
 // MoveIt
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_interface/planning_interface.h>
@@ -19,6 +22,13 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <pcl/surface/convex_hull.h>
+#include <pcl/features/fpfh_omp.h>  // ✅ FPFHEstimationOMP
+#include <pcl/registration/sample_consensus_prerejective.h> // ✅ SampleConsensusPrerejective
+#include <pcl/visualization/pcl_visualizer.h> // ✅ PCLVisualizer + ColorHandler
+#include <pcl/common/time.h>  // ✅ ScopeTime
+#include <thread>
+#include <chrono>
 
 // 特征估计 & 识别
 #include <pcl/features/normal_3d_omp.h>
@@ -57,7 +67,7 @@ public:
                    cw2_world_spawner::Task3Service::Response &response);
 
   // 控制函数
-  bool move_arm(const geometry_msgs::PointStamped& target);
+  bool move_to_pose(const geometry_msgs::PointStamped& target, double z_offset, bool reset_orientation);
   bool move_gripper(float width);
   bool rotate_end_effector(double yaw);
 
@@ -88,6 +98,96 @@ public:
       const typename pcl::PointCloud<PointT>::Ptr& scene_cloud,
       const std::string& model_path,
       Eigen::Matrix4f& transform_out);
+  // 生成凸包
+
+  void publishConvexHullMarker(
+    const std::vector<geometry_msgs::PointStamped>& corners,
+    ros::Publisher& marker_pub,
+    int id /*= 0*/);
+
+    geometry_msgs::PointStamped computeGraspPoint(
+      const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& hull,
+      const std::vector<geometry_msgs::PointStamped>& corners,
+      const std::string& shape_type);
+    void publishGraspPointMarker(
+      const geometry_msgs::PointStamped& grasp_point,
+      ros::Publisher& marker_pub,
+      int id);
+
+  std::pair<
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr,
+  std::vector<pcl::Vertices>
+  >
+  computeConvexHull(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& input_cloud);
+
+  std::vector<geometry_msgs::PointStamped> extract_corner_points(
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& cloud,
+    const std::vector<pcl::Vertices>& polygons,
+    size_t top_k,
+    const std::string& frame_id);
+
+  double compute_orientation(
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& hull,
+    const geometry_msgs::PointStamped& grasp_point);
+
+  
+  double compute_yaw_offset(const std::string& shape_type);
+
+  void publishOrientationArrow(
+    const geometry_msgs::PointStamped& origin,
+    double yaw,
+    ros::Publisher& marker_pub,
+    int id);
+
+  bool cartesian_grasp_and_place(
+    const geometry_msgs::PointStamped& grasp_point,
+    const geometry_msgs::PointStamped& place_point,
+    double rotate_angle);
+
+  geometry_msgs::PointStamped computeGraspPoint(
+    const geometry_msgs::Point& centroid,
+    const std::vector<geometry_msgs::PointStamped>& corners,
+    const std::string& shape_type);
+
+  geometry_msgs::Point computeCentroid(
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& hull);
+
+  geometry_msgs::Vector3 computeOffsetVector(
+    const geometry_msgs::PointStamped& grasp_point,
+    const geometry_msgs::Point& centroid);
+
+  geometry_msgs::PointStamped computeAdjustedPlacementPoint(
+    const geometry_msgs::PointStamped& original_place_point,
+    const geometry_msgs::Vector3& offset);
+
+  bool run_fpfh_alignment(
+    const std::string& object_path, 
+    const std::string& scene_path);
+
+  bool rotate_end_effector_roll_offset(double delta_roll);
+  bool rotate_end_effector_pitch_offset(double delta_pitch);
+
+
+  template <typename PointT>
+  bool savePointCloudToFile(const typename pcl::PointCloud<PointT>::Ptr& cloud,
+                            const std::string& filename);
+                            
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr filterOutGreenPoints(
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud);
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr filterTopLayer(
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud);
+  
+  void publishCentroidCircleMarker(
+    const geometry_msgs::Point& centroid,
+    double radius,
+    ros::Publisher& marker_pub,
+    int id
+    );
+  std::string classifyShapeByCentroidRegion(
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& cloud,
+    const geometry_msgs::Point& centroid,
+    double radius,
+    int threshold);
 
 private:
   ros::NodeHandle nh_;
@@ -99,6 +199,10 @@ private:
   // 点云相关
   ros::Subscriber cloud_sub_;
   ros::Publisher filtered_cloud_pub_;
+  ros::Publisher marker_pub_;
+  ros::Publisher grasp_point_pub_;
+  ros::Publisher grasp_arrow_pub_;
+  ros::Publisher centroid_pub_;
 
   // 分别保存 RGB 和 XYZ 的最新点云
   PointCloudRGB::Ptr latest_cloud_rgb;

@@ -1,0 +1,20 @@
+cd comp0250_s25_labs
+
+rm -rf ~/comp0250_s25_labs/build/cw1_team_35
+rm -rf ~/comp0250_s25_labs/devel/.private/cw1_team_35
+
+catkin build cw1_team_35 
+
+roscore
+
+source devel/setup.bash 
+roslaunch cw1_team_35 run_solution.launch
+
+source devel/setup.bash 
+rosservice call /task 1 
+
+source devel/setup.bash 
+rosservice call /task 2 
+
+source devel/setup.bash 
+rosservice call /task 3 

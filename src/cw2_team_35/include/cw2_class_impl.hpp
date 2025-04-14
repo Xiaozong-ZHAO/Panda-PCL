@@ -169,4 +169,22 @@ bool cw2::estimatePoseByMatchingGeneric(
   return true;
 }
 
+template <typename PointT>
+bool cw2::savePointCloudToFile(const typename pcl::PointCloud<PointT>::Ptr& cloud,
+                               const std::string& filename)
+{
+  if (!cloud || cloud->empty()) {
+    ROS_WARN("Trying to save an empty point cloud to %s", filename.c_str());
+    return false;
+  }
+
+  if (pcl::io::savePCDFileBinary(filename, *cloud) == 0) {
+    ROS_INFO("Saved point cloud to %s", filename.c_str());
+    return true;
+  } else {
+    ROS_ERROR("Failed to save point cloud to %s", filename.c_str());
+    return false;
+  }
+}
+
 #endif // CW2_CLASS_IMPL_HPP_
