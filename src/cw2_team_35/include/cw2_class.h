@@ -188,6 +188,12 @@ public:
     const geometry_msgs::Point& centroid,
     double radius,
     int threshold);
+  bool scan_sub_area(const std::vector<geometry_msgs::PointStamped>& corners);
+  bool record_initial_joint_and_pose();
+  bool save_initial_joint_and_pose();
+  bool go_to_initial_state();
+  bool rotate_base_joint(double delta_angle_rad);
+  geometry_msgs::PointStamped make_point(double x, double y, double z);
 
 private:
   ros::NodeHandle nh_;
@@ -203,6 +209,9 @@ private:
   ros::Publisher grasp_point_pub_;
   ros::Publisher grasp_arrow_pub_;
   ros::Publisher centroid_pub_;
+
+  std::vector<double> initial_joint_values_;
+  geometry_msgs::Pose initial_ee_pose_;
 
   // 分别保存 RGB 和 XYZ 的最新点云
   PointCloudRGB::Ptr latest_cloud_rgb;

@@ -906,20 +906,167 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
 {
   ROS_INFO("Task 3 callback triggered.");
 
-  // 1. move the robot to (0.5, 0, 0.5)
-  geometry_msgs::PointStamped initial_position;
-  initial_position.header.frame_id = "world";
-  initial_position.header.stamp = ros::Time::now();
-  initial_position.point.x = 0.3;
-  initial_position.point.y = 0.0;
-  initial_position.point.z = 0.5;
+  // 1. 使用已有的 move_to_pose 到初始位置 (0.5, 0.45, 0.5)
+  auto initial_position = make_point(0.5, 0.00, 0.5);
   if (!move_to_pose(initial_position, 0.0, true)) {
-    ROS_ERROR("Failed to move to initial position.");
+    ROS_ERROR("Failed to move to initial scan position.");
     return false;
   }
 
+  save_initial_joint_and_pose();
+
+  std::vector<geometry_msgs::PointStamped> area_front;
+  area_front.push_back(make_point(0.5, 0.45, 0.5));
+  area_front.push_back(make_point(0.5, -0.45, 0.5));
+  area_front.push_back(make_point(0.3, -0.45, 0.5));
+  area_front.push_back(make_point(0.3, 0.45, 0.5));
+
+  scan_sub_area(area_front);
+
+  if (!go_to_initial_state()) {
+    ROS_ERROR("Failed to return to initial state.");
+    return false;
+  }
+
+  rotate_base_joint(M_PI / 2.0);
+
+  std::vector<geometry_msgs::PointStamped> area_left;
+  area_left.push_back(make_point(0.05, 0.45, 0.5));
+  area_left.push_back(make_point(0.05, 0.40, 0.5));
+  area_left.push_back(make_point(-0.05, 0.40, 0.5));
+  area_left.push_back(make_point(-0.05, 0.45, 0.5));
+  scan_sub_area(area_left);
+
   return true;
 }
+
+geometry_msgs::PointStamped cw2::make_point(double x, double y, double z)
+{
+  geometry_msgs::PointStamped pt;
+  pt.header.frame_id = "world";
+  pt.header.stamp = ros::Time::now();
+  pt.point.x = x;
+  pt.point.y = y;
+  pt.point.z = z;
+  return pt;
+}
+
+
+bool cw2::rotate_base_joint(double delta_angle_rad)
+{
+  // 1. 获取当前关节角度
+  std::vector<double> joint_values = arm_group_.getCurrentJointValues();
+  if (joint_values.empty()) {
+    ROS_ERROR("Failed to get joint values.");
+    return false;
+  }
+
+  // 2. 修改第一个关节（base joint）角度
+  joint_values[0] += delta_angle_rad;
+
+  // 3. 设置目标
+  arm_group_.setJointValueTarget(joint_values);
+  arm_group_.setPlanningTime(5.0);
+  arm_group_.setMaxVelocityScalingFactor(0.7);
+  arm_group_.setMaxAccelerationScalingFactor(0.7);
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  if (arm_group_.plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS) {
+    arm_group_.execute(plan);
+    ROS_INFO("Rotated base joint by %.2f degrees.", delta_angle_rad * 180.0 / M_PI);
+    return true;
+  } else {
+    ROS_ERROR("Failed to plan base joint rotation.");
+    return false;
+  }
+}
+
+bool cw2::save_initial_joint_and_pose()
+{
+  initial_joint_values_ = arm_group_.getCurrentJointValues();
+  initial_ee_pose_ = arm_group_.getCurrentPose().pose;
+
+  ROS_INFO("Initial joint angles and pose saved.");
+  return true;
+}
+
+
+bool cw2::go_to_initial_state()
+{
+  if (initial_joint_values_.empty()) {
+    ROS_WARN("Initial joint values are not recorded yet!");
+    return false;
+  }
+
+  arm_group_.setJointValueTarget(initial_joint_values_);
+  arm_group_.setPlanningTime(5.0);
+  arm_group_.setMaxVelocityScalingFactor(0.7);
+  arm_group_.setMaxAccelerationScalingFactor(0.7);
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  if (arm_group_.plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS) {
+    arm_group_.execute(plan);
+    ROS_INFO("Returned to initial joint state.");
+    return true;
+  } else {
+    ROS_ERROR("Failed to plan return to initial joint state.");
+    return false;
+  }
+}
+
+
+bool cw2::scan_sub_area(const std::vector<geometry_msgs::PointStamped>& corners)
+{
+  if (corners.size() != 4) {
+    ROS_ERROR("scan_sub_area: exactly 4 corner points are required.");
+    return false;
+  }
+
+  ROS_INFO("Starting sub-area scanning with Cartesian path...");
+
+  // 1. 使用已有函数移动到第一个角点
+  if (!move_to_pose(corners[0], 0.0, true)) {
+    ROS_ERROR("Failed to move to first corner.");
+    return false;
+  }
+
+  ros::Duration(1.0).sleep();  // 可选等待
+
+  // 2. 构造从第1点开始的 path：2 -> 3 -> 4
+  std::vector<geometry_msgs::Pose> waypoints;
+
+  geometry_msgs::Pose base_pose = arm_group_.getCurrentPose().pose;
+
+  for (int i = 1; i < 4; ++i) {
+    geometry_msgs::Pose pose;
+    pose.position.x = corners[i].point.x;
+    pose.position.y = corners[i].point.y;
+    pose.position.z = corners[i].point.z;
+
+    pose.orientation = base_pose.orientation;  // 保持当前朝向
+
+    waypoints.push_back(pose);
+  }
+
+  // 3. 笛卡尔路径规划
+  moveit_msgs::RobotTrajectory trajectory;
+  const double eef_step = 0.01;
+  const double jump_threshold = 0.0;
+
+  double fraction = arm_group_.computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
+  if (fraction < 0.95) {
+    ROS_WARN("Cartesian path planning only %.2f%% success.", fraction * 100.0);
+    return false;
+  }
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  plan.trajectory_ = trajectory;
+  arm_group_.execute(plan);
+
+  ROS_INFO("Sub-area scanning completed.");
+  return true;
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // 点云回调函数
