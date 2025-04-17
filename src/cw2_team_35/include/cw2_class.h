@@ -29,6 +29,9 @@
 #include <pcl/common/time.h>  // ✅ ScopeTime
 #include <thread>
 #include <chrono>
+#include <octomap/octomap.h>
+#include <octomap_msgs/conversions.h>
+#include <octomap_msgs/Octomap.h>
 
 // 特征估计 & 识别
 #include <pcl/features/normal_3d_omp.h>
@@ -194,6 +197,10 @@ public:
   bool go_to_initial_state();
   bool rotate_base_joint(double delta_angle_rad);
   geometry_msgs::PointStamped make_point(double x, double y, double z);
+  void build_octomap_from_accumulated_clouds();
+  bool rotate_joint(const std::string& joint_name, double delta_angle_rad);
+  bool extract_objects(const octomap::OcTree& tree,
+    bool neighbor26 = true);
 
 private:
   ros::NodeHandle nh_;
@@ -209,6 +216,8 @@ private:
   ros::Publisher grasp_point_pub_;
   ros::Publisher grasp_arrow_pub_;
   ros::Publisher centroid_pub_;
+  pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_cloud_;
+  ros::Publisher octomap_pub_;
 
   std::vector<double> initial_joint_values_;
   geometry_msgs::Pose initial_ee_pose_;
@@ -219,8 +228,11 @@ private:
   PointCloudXYZ::Ptr model_cloud;
 
   bool cloud_received_;
+  bool is_scanning_ = false;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
+  std::shared_ptr<octomap::OcTree> latest_octree_;
+
 
   // MoveIt groups
   moveit::planning_interface::MoveGroupInterface arm_group_;

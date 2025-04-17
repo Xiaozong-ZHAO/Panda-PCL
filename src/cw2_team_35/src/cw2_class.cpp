@@ -30,10 +30,11 @@ cw2::cw2(ros::NodeHandle nh)
   grasp_point_pub_ = nh_.advertise<visualization_msgs::Marker>("/grasp_point_marker",1);
   grasp_arrow_pub_ = nh_.advertise<visualization_msgs::Marker>("/grasp_orientation_arrow", 1);
   centroid_pub_ = nh_.advertise<visualization_msgs::Marker>("/centroid_marker", 1);
+  octomap_pub_ = nh_.advertise<octomap_msgs::Octomap>("/constructed_octomap", 1, true);
   latest_cloud_rgb.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
   latest_cloud_xyz.reset(new pcl::PointCloud<pcl::PointXYZ>);
   model_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
-
+  accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -928,7 +929,7 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
     return false;
   }
 
-  rotate_base_joint(M_PI / 2.0);
+  rotate_joint("base", M_PI / 2.0);
 
   std::vector<geometry_msgs::PointStamped> area_left;
   area_left.push_back(make_point(0.05, 0.45, 0.5));
@@ -937,8 +938,167 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   area_left.push_back(make_point(-0.05, 0.45, 0.5));
   scan_sub_area(area_left);
 
+  if (!go_to_initial_state()) {
+    ROS_ERROR("Failed to return to initial state.");
+    return false;
+  }
+
+  rotate_joint("base", -M_PI / 2.0);
+
+  std::vector<geometry_msgs::PointStamped> area_right;
+  area_right.push_back(make_point(0.05, -0.45, 0.5));
+  area_right.push_back(make_point(0.05, -0.40, 0.5));
+  area_right.push_back(make_point(-0.05, -0.40, 0.5));
+  area_right.push_back(make_point(-0.05, -0.45, 0.5));
+  scan_sub_area(area_right);
+
+  if (!go_to_initial_state()) {
+    ROS_ERROR("Failed to return to initial state.");
+    return false;
+  }
+
+  std::vector<geometry_msgs::PointStamped> area_back;
+  area_back.push_back(make_point(-0.5, -0.45, 0.5));
+  area_back.push_back(make_point(-0.5, 0.45, 0.5));
+  area_back.push_back(make_point(-0.40, 0.45, 0.5));
+  area_back.push_back(make_point(-0.40, -0.45, 0.5));
+  scan_sub_area(area_back);
+
+  build_octomap_from_accumulated_clouds();
+
+  extract_objects(*latest_octree_, true);
+
   return true;
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// 直接在 OctoMap 上做连通域提取并打印每个物体的高度
+//  - resolution : tree.getResolution()，自动用于 Z 坐标换算
+//  - neighbor26 : true = 26邻接, false = 6邻接
+///////////////////////////////////////////////////////////////////////////////
+bool cw2::extract_objects(const octomap::OcTree& tree,
+  bool neighbor26)
+{
+using Key = octomap::OcTreeKey;
+struct KeyHash { size_t operator()(const Key& k) const {
+return (static_cast<size_t>(k.k[0]) << 42) ^
+(static_cast<size_t>(k.k[1]) << 21) ^
+static_cast<size_t>(k.k[2]);
+}};
+
+const double res = tree.getResolution();
+const int  deltas[26][3] = {  // 26‑邻域增量（含 6‑邻域）
+{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1},
+{-1,-1,0},{-1,1,0},{1,-1,0},{1,1,0},
+{-1,0,-1},{-1,0,1},{1,0,-1},{1,0,1},
+{0,-1,-1},{0,-1,1},{0,1,-1},{0,1,1},
+{-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1},
+{1,-1,-1},{1,-1,1},{1,1,-1},{1,1,1}
+};
+
+// ---------- 1. 把所有占据体素 key 收进表 ----------
+std::unordered_set<Key, KeyHash> occupied;
+for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it)
+if (tree.isNodeOccupied(*it))
+occupied.insert(it.getKey());
+
+if (occupied.empty()) {
+ROS_WARN("OctoMap 里没有占据体素，无法聚类。");
+return false;
+}
+
+// ---------- 2. 连通域 Flood‑Fill ----------
+std::unordered_set<Key, KeyHash> visited;
+int obj_id = 1;
+
+std::vector<Key> stack; stack.reserve(2048);
+
+for (const Key& seed : occupied)
+{
+if (visited.count(seed)) continue;
+
+double min_z =  std::numeric_limits<double>::max();
+double max_z = -std::numeric_limits<double>::max();
+size_t voxel_cnt = 0;
+
+stack.clear();
+stack.push_back(seed);
+visited.insert(seed);
+
+while (!stack.empty())
+{
+Key cur = stack.back(); stack.pop_back();
+++voxel_cnt;
+
+// 把树中离散索引转成实际坐标以取 Z
+octomap::point3d pt = tree.keyToCoord(cur);
+min_z = std::min<double>(min_z, pt.z());
+max_z = std::max<double>(max_z, pt.z());
+
+// 枚举邻居
+int nb_num = neighbor26 ? 26 : 6;
+for (int n = 0; n < nb_num; ++n)
+{
+Key nb(cur[0] + deltas[n][0],
+cur[1] + deltas[n][1],
+cur[2] + deltas[n][2]);
+if (occupied.count(nb) && !visited.count(nb))
+{
+visited.insert(nb);
+stack.push_back(nb);
+}
+}
+}
+
+double height = max_z - min_z + res;   // 体素栅格要加一个分辨率
+double volume = voxel_cnt * std::pow(res,3);
+
+ROS_INFO("Object %d  ▶  voxels=%zu, height=%.3f m, volume≈%.6f m³",
+obj_id++, voxel_cnt, height, volume);
+}
+
+return true;
+}
+
+
+void cw2::build_octomap_from_accumulated_clouds()
+{
+  ROS_INFO("Building OctoMap from accumulated cloud...");
+
+  // 创建一个八叉树对象，分辨率可调
+  double resolution = 0.005;
+
+  if (!latest_octree_)
+      latest_octree_ = std::make_shared<octomap::OcTree>(resolution);
+  else
+      latest_octree_->clear();
+
+  for (const auto& pt : accumulated_cloud_->points)
+  {
+    if (!std::isnan(pt.x) && !std::isnan(pt.y) && !std::isnan(pt.z))
+    {
+      latest_octree_->updateNode(octomap::point3d(pt.x, pt.y, pt.z), true);  // 插入占据点
+    }
+  }
+
+  latest_octree_->updateInnerOccupancy();
+
+  // 转成 Octomap 消息并发布
+  octomap_msgs::Octomap map_msg;
+  map_msg.header.frame_id = "world";
+  map_msg.header.stamp = ros::Time::now();
+  if (octomap_msgs::fullMapToMsg(*latest_octree_, map_msg))
+  {
+    octomap_pub_.publish(map_msg);
+    ROS_INFO("Published octomap with %zu nodes.", latest_octree_->size());
+  }
+  else
+  {
+    ROS_ERROR("Failed to convert octomap to ROS message.");
+  }
+}
+
+
 
 geometry_msgs::PointStamped cw2::make_point(double x, double y, double z)
 {
@@ -952,19 +1112,44 @@ geometry_msgs::PointStamped cw2::make_point(double x, double y, double z)
 }
 
 
-bool cw2::rotate_base_joint(double delta_angle_rad)
+bool cw2::rotate_joint(const std::string& joint_name, double delta_angle_rad)
 {
-  // 1. 获取当前关节角度
+  // 1. 建立关节名字到索引的映射
+  std::map<std::string, int> joint_name_to_index = {
+    {"base", 0},
+    {"shoulder", 1},
+    {"upper_arm", 2},
+    {"elbow", 3},
+    {"forearm", 4},
+    {"wrist", 5},
+    {"eef", 6}
+  };
+
+  // 2. 检查 joint_name 是否有效
+  auto it = joint_name_to_index.find(joint_name);
+  if (it == joint_name_to_index.end()) {
+    ROS_ERROR("Invalid joint name: %s", joint_name.c_str());
+    return false;
+  }
+
+  int joint_index = it->second;
+
+  // 3. 获取当前关节角度
   std::vector<double> joint_values = arm_group_.getCurrentJointValues();
   if (joint_values.empty()) {
     ROS_ERROR("Failed to get joint values.");
     return false;
   }
 
-  // 2. 修改第一个关节（base joint）角度
-  joint_values[0] += delta_angle_rad;
+  if (joint_index < 0 || joint_index >= joint_values.size()) {
+    ROS_ERROR("Joint index %d is out of range.", joint_index);
+    return false;
+  }
 
-  // 3. 设置目标
+  // 4. 旋转指定的关节
+  joint_values[joint_index] += delta_angle_rad;
+
+  // 5. 设置目标并执行
   arm_group_.setJointValueTarget(joint_values);
   arm_group_.setPlanningTime(5.0);
   arm_group_.setMaxVelocityScalingFactor(0.7);
@@ -973,10 +1158,10 @@ bool cw2::rotate_base_joint(double delta_angle_rad)
   moveit::planning_interface::MoveGroupInterface::Plan plan;
   if (arm_group_.plan(plan) == moveit::planning_interface::MoveItErrorCode::SUCCESS) {
     arm_group_.execute(plan);
-    ROS_INFO("Rotated base joint by %.2f degrees.", delta_angle_rad * 180.0 / M_PI);
+    ROS_INFO("Rotated joint [%s] by %.2f degrees.", joint_name.c_str(), delta_angle_rad * 180.0 / M_PI);
     return true;
   } else {
-    ROS_ERROR("Failed to plan base joint rotation.");
+    ROS_ERROR("Failed to plan joint rotation.");
     return false;
   }
 }
@@ -1061,9 +1246,9 @@ bool cw2::scan_sub_area(const std::vector<geometry_msgs::PointStamped>& corners)
 
   moveit::planning_interface::MoveGroupInterface::Plan plan;
   plan.trajectory_ = trajectory;
-  arm_group_.execute(plan);
-
-  ROS_INFO("Sub-area scanning completed.");
+  is_scanning_ = true;
+  arm_group_.execute(plan);  // 机械臂执行路径，期间回调中不断采点
+  is_scanning_ = false;
   return true;
 }
 
@@ -1077,6 +1262,22 @@ void cw2::pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   pcl::fromROSMsg(*msg, *latest_cloud_rgb);
   pcl::fromROSMsg(*msg, *latest_cloud_xyz);
   cloud_received_ = true;
+
+  if (is_scanning_) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
+    try {
+      pcl_ros::transformPointCloud("world", *latest_cloud_xyz, *transformed, tf_buffer_);
+      auto filtered = filterPassThrough<pcl::PointXYZ>(
+        transformed,    // 输入点云
+        "z",                 // 过滤字段
+        0.04f,                // z最小
+        0.4f                 // z最大
+    );
+      *accumulated_cloud_ += *filtered;
+    } catch (tf2::TransformException &ex) {
+      ROS_WARN("TF transform failed: %s", ex.what());
+    }
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
