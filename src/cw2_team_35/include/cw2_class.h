@@ -1,6 +1,6 @@
 #ifndef CW2_CLASS_H_
 #define CW2_CLASS_H_
-
+#include <algorithm>
 // ROS
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>

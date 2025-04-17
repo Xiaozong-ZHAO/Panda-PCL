@@ -932,10 +932,10 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   rotate_joint("base", M_PI / 2.0);
 
   std::vector<geometry_msgs::PointStamped> area_left;
-  area_left.push_back(make_point(0.05, 0.45, 0.5));
-  area_left.push_back(make_point(0.05, 0.40, 0.5));
-  area_left.push_back(make_point(-0.05, 0.40, 0.5));
-  area_left.push_back(make_point(-0.05, 0.45, 0.5));
+  area_left.push_back(make_point(0.10, 0.45, 0.5));
+  area_left.push_back(make_point(0.10, 0.40, 0.5));
+  area_left.push_back(make_point(-0.10, 0.40, 0.5));
+  area_left.push_back(make_point(-0.10, 0.45, 0.5));
   scan_sub_area(area_left);
 
   if (!go_to_initial_state()) {
@@ -946,10 +946,10 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   rotate_joint("base", -M_PI / 2.0);
 
   std::vector<geometry_msgs::PointStamped> area_right;
-  area_right.push_back(make_point(0.05, -0.45, 0.5));
-  area_right.push_back(make_point(0.05, -0.40, 0.5));
-  area_right.push_back(make_point(-0.05, -0.40, 0.5));
-  area_right.push_back(make_point(-0.05, -0.45, 0.5));
+  area_right.push_back(make_point(0.10, -0.45, 0.5));
+  area_right.push_back(make_point(0.10, -0.40, 0.5));
+  area_right.push_back(make_point(-0.10, -0.40, 0.5));
+  area_right.push_back(make_point(-0.10, -0.45, 0.5));
   scan_sub_area(area_right);
 
   if (!go_to_initial_state()) {
@@ -976,88 +976,97 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
 //  - resolution : tree.getResolution()，自动用于 Z 坐标换算
 //  - neighbor26 : true = 26邻接, false = 6邻接
 ///////////////////////////////////////////////////////////////////////////////
-bool cw2::extract_objects(const octomap::OcTree& tree,
-  bool neighbor26)
+bool cw2::extract_objects(const octomap::OcTree& tree, bool neighbor26)
 {
-using Key = octomap::OcTreeKey;
-struct KeyHash { size_t operator()(const Key& k) const {
-return (static_cast<size_t>(k.k[0]) << 42) ^
-(static_cast<size_t>(k.k[1]) << 21) ^
-static_cast<size_t>(k.k[2]);
-}};
+  using Key = octomap::OcTreeKey;
+  struct KeyHash {
+    size_t operator()(const Key& k) const {
+      return (static_cast<size_t>(k.k[0]) << 42) ^
+             (static_cast<size_t>(k.k[1]) << 21) ^
+             static_cast<size_t>(k.k[2]);
+    }
+  };
 
-const double res = tree.getResolution();
-const int  deltas[26][3] = {  // 26‑邻域增量（含 6‑邻域）
-{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1},
-{-1,-1,0},{-1,1,0},{1,-1,0},{1,1,0},
-{-1,0,-1},{-1,0,1},{1,0,-1},{1,0,1},
-{0,-1,-1},{0,-1,1},{0,1,-1},{0,1,1},
-{-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1},
-{1,-1,-1},{1,-1,1},{1,1,-1},{1,1,1}
-};
+  const double res = tree.getResolution();
+  const int min_voxel_threshold = 200;  // filter small clusters
+  const int deltas[26][3] = {
+    {-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1},
+    {-1,-1,0},{-1,1,0},{1,-1,0},{1,1,0},
+    {-1,0,-1},{-1,0,1},{1,0,-1},{1,0,1},
+    {0,-1,-1},{0,-1,1},{0,1,-1},{0,1,1},
+    {-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1},
+    {1,-1,-1},{1,-1,1},{1,1,-1},{1,1,1}
+  };
 
-// ---------- 1. 把所有占据体素 key 收进表 ----------
-std::unordered_set<Key, KeyHash> occupied;
-for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it)
-if (tree.isNodeOccupied(*it))
-occupied.insert(it.getKey());
+  std::unordered_set<Key, KeyHash> occupied;
+  for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it)
+  {
+    if (tree.isNodeOccupied(*it))
+      occupied.insert(it.getKey());
+  }
 
-if (occupied.empty()) {
-ROS_WARN("OctoMap 里没有占据体素，无法聚类。");
-return false;
-}
+  if (occupied.empty()) {
+    ROS_WARN("OctoMap contains no occupied voxels. Skipping clustering.");
+    return false;
+  }
 
-// ---------- 2. 连通域 Flood‑Fill ----------
-std::unordered_set<Key, KeyHash> visited;
-int obj_id = 1;
+  std::unordered_set<Key, KeyHash> visited;
+  std::vector<Key> stack;
+  stack.reserve(2048);
 
-std::vector<Key> stack; stack.reserve(2048);
+  int obj_id = 1;
 
-for (const Key& seed : occupied)
-{
-if (visited.count(seed)) continue;
+  for (const Key& seed : occupied)
+  {
+    if (visited.count(seed)) continue;
 
-double min_z =  std::numeric_limits<double>::max();
-double max_z = -std::numeric_limits<double>::max();
-size_t voxel_cnt = 0;
+    double min_z =  std::numeric_limits<double>::max();
+    double max_z = -std::numeric_limits<double>::max();
+    size_t voxel_cnt = 0;
 
-stack.clear();
-stack.push_back(seed);
-visited.insert(seed);
+    stack.clear();
+    stack.push_back(seed);
+    visited.insert(seed);
 
-while (!stack.empty())
-{
-Key cur = stack.back(); stack.pop_back();
-++voxel_cnt;
+    while (!stack.empty())
+    {
+      Key cur = stack.back();
+      stack.pop_back();
+      voxel_cnt++;
 
-// 把树中离散索引转成实际坐标以取 Z
-octomap::point3d pt = tree.keyToCoord(cur);
-min_z = std::min<double>(min_z, pt.z());
-max_z = std::max<double>(max_z, pt.z());
+      octomap::point3d pt = tree.keyToCoord(cur);
+      min_z = std::min(min_z, static_cast<double>(pt.z()));
+      max_z = std::max(max_z, static_cast<double>(pt.z()));
 
-// 枚举邻居
-int nb_num = neighbor26 ? 26 : 6;
-for (int n = 0; n < nb_num; ++n)
-{
-Key nb(cur[0] + deltas[n][0],
-cur[1] + deltas[n][1],
-cur[2] + deltas[n][2]);
-if (occupied.count(nb) && !visited.count(nb))
-{
-visited.insert(nb);
-stack.push_back(nb);
-}
-}
-}
+      int nb_num = neighbor26 ? 26 : 6;
+      for (int i = 0; i < nb_num; ++i)
+      {
+        Key nb(cur[0] + deltas[i][0],
+               cur[1] + deltas[i][1],
+               cur[2] + deltas[i][2]);
 
-double height = max_z - min_z + res;   // 体素栅格要加一个分辨率
-double volume = voxel_cnt * std::pow(res,3);
+        if (occupied.count(nb) && !visited.count(nb))
+        {
+          visited.insert(nb);
+          stack.push_back(nb);
+        }
+      }
+    }
 
-ROS_INFO("Object %d  ▶  voxels=%zu, height=%.3f m, volume≈%.6f m³",
-obj_id++, voxel_cnt, height, volume);
-}
+    if (voxel_cnt < min_voxel_threshold)
+    {
+      // ROS_INFO("Skipped small cluster: voxels=%zu (threshold=%d)", voxel_cnt, min_voxel_threshold);
+      continue;
+    }
 
-return true;
+    double height = max_z - min_z + res;
+    double volume = voxel_cnt * std::pow(res, 3);
+
+    ROS_INFO("Object %d: voxel_count=%zu, height=%.3f m, volume=%.6f m3",
+             obj_id++, voxel_cnt, height, volume);
+  }
+
+  return true;
 }
 
 
@@ -1238,7 +1247,8 @@ bool cw2::scan_sub_area(const std::vector<geometry_msgs::PointStamped>& corners)
   const double eef_step = 0.01;
   const double jump_threshold = 0.0;
 
-  double fraction = arm_group_.computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
+  double fraction = arm_group_.computeCartesianPath(waypoints, eef_step, trajectory, true);
+
   if (fraction < 0.95) {
     ROS_WARN("Cartesian path planning only %.2f%% success.", fraction * 100.0);
     return false;
