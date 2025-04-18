@@ -5,27 +5,29 @@ solution is contained within the cw2_team_<your_team_number> package */
 
 #include <cw2_class.h> // change to your team name here!
 
-int main(int argc, char **argv){
-  
-  ros::init(argc,argv, "cw2_solution_node");
+int main(int argc, char **argv)
+{
+  ros::init(argc, argv, "cw2_solution_node");
   ros::NodeHandle nh;
 
-  // create an instance of the cw2 class
+  // 实例化你的类
   cw2 cw_class(nh);
 
-  // MoveIt! requirement for non-blocking group.move()
+  // 启动异步 spinner（MoveIt 非阻塞必须）
   ros::AsyncSpinner spinner(1);
   spinner.start();
 
-  // loop rate in Hz
-  ros::Rate rate(10);
+  /* ---------- 用 make_point 简化 ---------- */
+  geometry_msgs::PointStamped standby = cw_class.make_point(0.4, 0.0, 0.5);
+  cw_class.move_to_pose(standby, /*z_offset=*/0.0, /*reset_orientation=*/true);
+  ros::Duration(1.0).sleep();
 
-  while (ros::ok()) {
-
-    // spin and process all pending callbacks
+  /* ---------- 进入 ROS 主循环 ---------- */
+  ros::Rate loop_hz(10);
+  while (ros::ok())
+  {
     ros::spinOnce();
-
-    // sleep to fulfill the loop rate
-    rate.sleep();
+    loop_hz.sleep();
   }
 }
+

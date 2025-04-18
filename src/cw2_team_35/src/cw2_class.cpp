@@ -31,10 +31,12 @@ cw2::cw2(ros::NodeHandle nh)
   grasp_arrow_pub_ = nh_.advertise<visualization_msgs::Marker>("/grasp_orientation_arrow", 1);
   centroid_pub_ = nh_.advertise<visualization_msgs::Marker>("/centroid_marker", 1);
   octomap_pub_ = nh_.advertise<octomap_msgs::Octomap>("/constructed_octomap", 1, true);
+  accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1, true);
+  cluster_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cluster_centroids", 1);
   latest_cloud_rgb.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
   latest_cloud_xyz.reset(new pcl::PointCloud<pcl::PointXYZ>);
   model_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
-  accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZ>);
+  accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -968,8 +970,109 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
 
   extract_objects(*latest_octree_, true);
 
+  // publishAccumulatedCloud();
+  // clusterAccumulatedPointCloud();
   return true;
 }
+
+void cw2::clusterAccumulatedPointCloud()
+{
+  if (accumulated_cloud_->empty()) {
+    ROS_WARN("No data in accumulated_cloud_ for clustering.");
+    return;
+  }
+
+  // 1. 创建搜索树
+  pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZRGB>);
+  tree->setInputCloud(accumulated_cloud_);
+
+  // 2. 聚类配置
+  std::vector<pcl::PointIndices> cluster_indices;
+  pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
+  ec.setClusterTolerance(0.02);  // 最大点间距
+  ec.setMinClusterSize(100);     // 最小聚类点数
+  ec.setMaxClusterSize(25000);
+  ec.setSearchMethod(tree);
+  ec.setInputCloud(accumulated_cloud_);
+  ec.extract(cluster_indices);
+
+  int cluster_id = 0;
+  visualization_msgs::MarkerArray markers;
+
+  for (const auto& indices : cluster_indices)
+  {
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZRGB>);
+    pcl::copyPointCloud(*accumulated_cloud_, indices, *cluster);
+
+    // 3. 计算质心
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*cluster, centroid);
+
+    // 4. 计算高度（z_max - z_min）
+    float z_min = std::numeric_limits<float>::max();
+    float z_max = -std::numeric_limits<float>::max();
+    for (const auto& pt : cluster->points)
+    {
+      if (!std::isnan(pt.z)) {
+        z_min = std::min(z_min, pt.z);
+        z_max = std::max(z_max, pt.z);
+      }
+    }
+    float height = z_max - z_min;
+
+    // 5. 输出信息
+    ROS_INFO("Cluster %d: size=%lu, centroid=(%.3f, %.3f, %.3f), height=%.3f m",
+             cluster_id, cluster->size(), centroid[0], centroid[1], centroid[2], height);
+
+    // 6. 可视化：显示聚类中心点
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = "world";
+    marker.header.stamp = ros::Time::now();
+    marker.ns = "/cluster_centroids";
+    marker.id = cluster_id;
+    marker.type = visualization_msgs::Marker::SPHERE;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.pose.position.x = centroid[0];
+    marker.pose.position.y = centroid[1];
+    marker.pose.position.z = centroid[2];
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.03;
+    marker.scale.y = 0.03;
+    marker.scale.z = 0.03;
+    marker.color.r = 1.0;
+    marker.color.g = 0.0;
+    marker.color.b = 0.0;
+    marker.color.a = 1.0;
+    marker.lifetime = ros::Duration(0.0);
+    markers.markers.push_back(marker);
+
+    ++cluster_id;
+  }
+
+  cluster_marker_pub_.publish(markers);
+
+  if (cluster_id == 0)
+    ROS_WARN("No clusters found in accumulated cloud.");
+}
+
+
+void cw2::publishAccumulatedCloud()
+{
+  if (!accumulated_cloud_ || accumulated_cloud_->empty())
+  {
+    ROS_WARN("No accumulated cloud to publish.");
+    return;
+  }
+
+  sensor_msgs::PointCloud2 cloud_msg;
+  pcl::toROSMsg(*accumulated_cloud_, cloud_msg);
+  cloud_msg.header.frame_id = "world";  // 或你使用的坐标系
+  cloud_msg.header.stamp = ros::Time::now();
+
+  accumulated_cloud_pub_.publish(cloud_msg);
+  ROS_INFO("Published accumulated cloud with %zu points.", accumulated_cloud_->size());
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // 直接在 OctoMap 上做连通域提取并打印每个物体的高度
@@ -980,36 +1083,38 @@ bool cw2::extract_objects(const octomap::OcTree& tree, bool neighbor26)
 {
   using Key = octomap::OcTreeKey;
   struct KeyHash {
-    size_t operator()(const Key& k) const {
-      return (static_cast<size_t>(k.k[0]) << 42) ^
-             (static_cast<size_t>(k.k[1]) << 21) ^
-             static_cast<size_t>(k.k[2]);
-    }
+      size_t operator()(const Key& k) const {
+        return (static_cast<size_t>(k.k[0]) << 42) ^
+               (static_cast<size_t>(k.k[1]) << 21) ^
+               static_cast<size_t>(k.k[2]);
+      }
   };
 
+  // ───────────────────────────────────
   const double res = tree.getResolution();
-  const int min_voxel_threshold = 200;  // filter small clusters
-  const int deltas[26][3] = {
-    {-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1},
-    {-1,-1,0},{-1,1,0},{1,-1,0},{1,1,0},
-    {-1,0,-1},{-1,0,1},{1,0,-1},{1,0,1},
-    {0,-1,-1},{0,-1,1},{0,1,-1},{0,1,1},
-    {-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1},
-    {1,-1,-1},{1,-1,1},{1,1,-1},{1,1,1}
+  const int min_voxel_threshold = 200;     // 忽略太小的簇
+  const int deltas[26][3] = {              // 26/6‑邻域偏移表
+      {-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1},
+      {-1,-1,0},{-1,1,0},{1,-1,0},{1,1,0},
+      {-1,0,-1},{-1,0,1},{1,0,-1},{1,0,1},
+      {0,-1,-1},{0,-1,1},{0,1,-1},{0,1,1},
+      {-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1},
+      {1,-1,-1},{1,-1,1},{1,1,-1},{1,1,1}
   };
+  // ───────────────────────────────────
 
+  /* ---------- 1. 收集全部占据体素 ---------- */
   std::unordered_set<Key, KeyHash> occupied;
   for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it)
-  {
     if (tree.isNodeOccupied(*it))
       occupied.insert(it.getKey());
-  }
 
   if (occupied.empty()) {
-    ROS_WARN("OctoMap contains no occupied voxels. Skipping clustering.");
+    ROS_WARN("OctoMap contains no occupied voxels.");
     return false;
   }
 
+  /* ---------- 2. flood‑fill 连通域 ---------- */
   std::unordered_set<Key, KeyHash> visited;
   std::vector<Key> stack;
   stack.reserve(2048);
@@ -1020,61 +1125,103 @@ bool cw2::extract_objects(const octomap::OcTree& tree, bool neighbor26)
   {
     if (visited.count(seed)) continue;
 
-    double min_z =  std::numeric_limits<double>::max();
-    double max_z = -std::numeric_limits<double>::max();
+    // 统计极值 & 保存簇体素
+    double min_x=1e9,max_x=-1e9,min_y=1e9,max_y=-1e9,min_z=1e9,max_z=-1e9;
+    std::unordered_set<Key,KeyHash> cluster_voxels;
     size_t voxel_cnt = 0;
 
-    stack.clear();
-    stack.push_back(seed);
-    visited.insert(seed);
+    stack.clear();  stack.push_back(seed);  visited.insert(seed);
 
-    while (!stack.empty())
-    {
-      Key cur = stack.back();
-      stack.pop_back();
-      voxel_cnt++;
+    while(!stack.empty()){
+      Key cur = stack.back(); stack.pop_back();
+      voxel_cnt++;  cluster_voxels.insert(cur);
 
-      octomap::point3d pt = tree.keyToCoord(cur);
-      min_z = std::min(min_z, static_cast<double>(pt.z()));
-      max_z = std::max(max_z, static_cast<double>(pt.z()));
+      octomap::point3d p = tree.keyToCoord(cur);
+      min_x=std::min(min_x,(double)p.x());  max_x=std::max(max_x,(double)p.x());
+      min_y=std::min(min_y,(double)p.y());  max_y=std::max(max_y,(double)p.y());
+      min_z=std::min(min_z,(double)p.z());  max_z=std::max(max_z,(double)p.z());
 
-      int nb_num = neighbor26 ? 26 : 6;
-      for (int i = 0; i < nb_num; ++i)
-      {
-        Key nb(cur[0] + deltas[i][0],
-               cur[1] + deltas[i][1],
-               cur[2] + deltas[i][2]);
-
-        if (occupied.count(nb) && !visited.count(nb))
-        {
+      int nb_num = neighbor26?26:6;
+      for(int i=0;i<nb_num;++i){
+        Key nb(cur[0]+deltas[i][0],cur[1]+deltas[i][1],cur[2]+deltas[i][2]);
+        if(occupied.count(nb) && !visited.count(nb)){
           visited.insert(nb);
           stack.push_back(nb);
         }
       }
     }
 
-    if (voxel_cnt < min_voxel_threshold)
+    if (voxel_cnt < min_voxel_threshold) continue;
+
+    /* ---------- 3. 高度分类 ---------- */
+    double height = max_z - min_z + res;   // 物体整体高度
+    std::string category;
+    if (height > 0.05)            category = "obstacle";
+    else if (height >= 0.03)      category = "basket";
+    else                          category = "object";
+
+    /* ---------- 4. 若为 object, 进一步判断形状 ---------- */
+    std::string shape = "N/A";
+    geometry_msgs::Point centroid_msg;
+
+    if (category == "object")
     {
-      // ROS_INFO("Skipped small cluster: voxels=%zu (threshold=%d)", voxel_cnt, min_voxel_threshold);
-      continue;
+      // 4‑1 提取“表面层”：z >= max_z - res/2
+      std::vector<octomap::point3d> surface_pts;
+      octomap::OcTreeKey max_z_key = tree.coordToKey(0.0, 0.0, max_z);  // 取出 z 层编号
+      for (const Key& k : cluster_voxels)
+      {
+        if (k[2] == max_z_key[2])   // 表面层（key在z轴方向相等）
+          surface_pts.emplace_back(tree.keyToCoord(k));
+      }
+
+
+      // 4‑2 计算质心
+      if(!surface_pts.empty()){
+        double sx=0,sy=0,sz=0;
+        for(const auto& p:surface_pts){ sx+=p.x(); sy+=p.y(); sz+=p.z(); }
+        centroid_msg.x = sx/surface_pts.size();
+        centroid_msg.y = sy/surface_pts.size();
+        centroid_msg.z = sz/surface_pts.size();
+      }
+
+      /* 4‑3 判断中心空心：若表面层中心 3×3×1 体素内有占据，则 cross，否则 nought */
+      Key center_key = tree.coordToKey(centroid_msg.x,
+                                       centroid_msg.y,
+                                       max_z);          // 只看表面层
+      bool center_occupied = false;
+      for(int dx=-1;dx<=1 && !center_occupied;++dx)
+        for(int dy=-1;dy<=1 && !center_occupied;++dy)
+        {
+          Key ck(center_key[0]+dx, center_key[1]+dy, center_key[2]);
+          if(cluster_voxels.count(ck)){
+            center_occupied = true;
+            break;
+          }
+        }
+
+      shape = center_occupied ? "cross" : "nought";
     }
 
-    double height = max_z - min_z + res;
-    double volume = voxel_cnt * std::pow(res, 3);
+    /* ---------- 5. 输出 ---------- */
+    ROS_INFO("Object %d: voxels=%zu  height=%.3f  category=%s  shape=%s",
+             obj_id++, voxel_cnt, height, category.c_str(), shape.c_str());
 
-    ROS_INFO("Object %d: voxel_count=%zu, height=%.3f m, volume=%.6f m3",
-             obj_id++, voxel_cnt, height, volume);
+    if(category=="object"){
+      ROS_INFO("         centroid = (%.3f, %.3f, %.3f)",
+               centroid_msg.x, centroid_msg.y, centroid_msg.z);
+      // 需要的话这里可发布 Marker 可视化质心
+    }
   }
-
   return true;
 }
 
 
+
 void cw2::build_octomap_from_accumulated_clouds()
 {
-  ROS_INFO("Building OctoMap from accumulated cloud...");
+  ROS_INFO("Building OctoMap from RGB accumulated cloud...");
 
-  // 创建一个八叉树对象，分辨率可调
   double resolution = 0.005;
 
   if (!latest_octree_)
@@ -1086,13 +1233,12 @@ void cw2::build_octomap_from_accumulated_clouds()
   {
     if (!std::isnan(pt.x) && !std::isnan(pt.y) && !std::isnan(pt.z))
     {
-      latest_octree_->updateNode(octomap::point3d(pt.x, pt.y, pt.z), true);  // 插入占据点
+      latest_octree_->updateNode(octomap::point3d(pt.x, pt.y, pt.z), true);
     }
   }
 
   latest_octree_->updateInnerOccupancy();
 
-  // 转成 Octomap 消息并发布
   octomap_msgs::Octomap map_msg;
   map_msg.header.frame_id = "world";
   map_msg.header.stamp = ros::Time::now();
@@ -1274,16 +1420,26 @@ void cw2::pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   cloud_received_ = true;
 
   if (is_scanning_) {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZRGB>);
     try {
-      pcl_ros::transformPointCloud("world", *latest_cloud_xyz, *transformed, tf_buffer_);
-      auto filtered = filterPassThrough<pcl::PointXYZ>(
-        transformed,    // 输入点云
-        "z",                 // 过滤字段
-        0.04f,                // z最小
-        0.4f                 // z最大
-    );
-      *accumulated_cloud_ += *filtered;
+      pcl_ros::transformPointCloud("world", *latest_cloud_rgb, *transformed, tf_buffer_);
+      auto pt_filtered = filterPassThrough<pcl::PointXYZRGB>(
+        transformed,
+        "z",
+        0.04f,
+        0.4f
+      );
+      
+      // 再加一层体素滤波
+      pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
+      voxel_filter.setInputCloud(pt_filtered);
+      voxel_filter.setLeafSize(0.003f, 0.003f, 0.003f);  // 体素大小：根据你需要精度调整
+      
+      pcl::PointCloud<pcl::PointXYZRGB>::Ptr downsampled(new pcl::PointCloud<pcl::PointXYZRGB>);
+      voxel_filter.filter(*downsampled);
+      
+      // 再叠加
+      *accumulated_cloud_ += *downsampled;
     } catch (tf2::TransformException &ex) {
       ROS_WARN("TF transform failed: %s", ex.what());
     }

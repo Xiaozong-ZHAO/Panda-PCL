@@ -27,6 +27,10 @@
 #include <pcl/registration/sample_consensus_prerejective.h> // ✅ SampleConsensusPrerejective
 #include <pcl/visualization/pcl_visualizer.h> // ✅ PCLVisualizer + ColorHandler
 #include <pcl/common/time.h>  // ✅ ScopeTime
+#include <pcl/segmentation/extract_clusters.h>
+#include <visualization_msgs/MarkerArray.h>
+
+
 #include <thread>
 #include <chrono>
 #include <octomap/octomap.h>
@@ -200,7 +204,11 @@ public:
   void build_octomap_from_accumulated_clouds();
   bool rotate_joint(const std::string& joint_name, double delta_angle_rad);
   bool extract_objects(const octomap::OcTree& tree,
-    bool neighbor26 = true);
+    bool neighbor26,
+    std::vector<DetectedObj>& out);   // <── 新增一个输出参数
+  
+  void publishAccumulatedCloud();
+  void clusterAccumulatedPointCloud();
 
 private:
   ros::NodeHandle nh_;
@@ -216,8 +224,10 @@ private:
   ros::Publisher grasp_point_pub_;
   ros::Publisher grasp_arrow_pub_;
   ros::Publisher centroid_pub_;
-  pcl::PointCloud<pcl::PointXYZ>::Ptr accumulated_cloud_;
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr accumulated_cloud_;
   ros::Publisher octomap_pub_;
+  ros::Publisher accumulated_cloud_pub_;
+  ros::Publisher cluster_marker_pub_;
 
   std::vector<double> initial_joint_values_;
   geometry_msgs::Pose initial_ee_pose_;
@@ -232,6 +242,12 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   std::shared_ptr<octomap::OcTree> latest_octree_;
+  struct DetectedObj
+{
+  geometry_msgs::Point centroid;   // 世界系
+  std::string category;            // obstacle / basket / object
+  std::string shape;               // cross / nought / "N/A"
+};
 
 
   // MoveIt groups
