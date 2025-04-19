@@ -33,10 +33,12 @@ cw2::cw2(ros::NodeHandle nh)
   octomap_pub_ = nh_.advertise<octomap_msgs::Octomap>("/constructed_octomap", 1, true);
   accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1, true);
   cluster_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cluster_centroids", 1);
+  basket_pub_ = nh_.advertise<visualization_msgs::Marker>("/basket_marker", 1);
   latest_cloud_rgb.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
   latest_cloud_xyz.reset(new pcl::PointCloud<pcl::PointXYZ>);
   model_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
   accumulated_cloud_.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
+  srand(static_cast<unsigned>(time(nullptr)));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -172,7 +174,8 @@ bool cw2::cartesian_grasp_and_place(
     ROS_WARN("Cartesian path planning failed (%.2f%%). Falling back to point-to-point planning.", fraction * 100.0);
 
     // fallback：使用 move_to_pose 分段移动
-    geometry_msgs::PointStamped mid1 = place_point;
+    // geometry_msgs::PointStamped mid1 = place_point;
+    geometry_msgs::PointStamped mid1 = grasp_point;
     mid1.point.z = grasp_point.point.z + 0.2;
 
     geometry_msgs::PointStamped mid2 = place_point;
@@ -904,76 +907,191 @@ bool cw2::run_fpfh_alignment(const std::string& object_path, const std::string& 
 ///////////////////////////////////////////////////////////////////////////////
 // Task 3 回调函数
 ///////////////////////////////////////////////////////////////////////////////
-bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
-                      cw2_world_spawner::Task3Service::Response &response)
+bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &,
+  cw2_world_spawner::Task3Service::Response &)
 {
-  ROS_INFO("Task 3 callback triggered.");
+ROS_INFO("Task-3 start.");
 
-  // 1. 使用已有的 move_to_pose 到初始位置 (0.5, 0.45, 0.5)
-  auto initial_position = make_point(0.5, 0.00, 0.5);
-  if (!move_to_pose(initial_position, 0.0, true)) {
-    ROS_ERROR("Failed to move to initial scan position.");
-    return false;
-  }
+auto initial = make_point(0.5, 0.0, 0.5);
+if (!move_to_pose(initial, 0.0, true)) return false;
+save_initial_joint_and_pose();
 
-  save_initial_joint_and_pose();
+scan_sub_area({make_point(0.5, 0.45, 0.5), make_point(0.5, -0.45, 0.5),
+make_point(0.3, -0.45, 0.5), make_point(0.3, 0.45, 0.5)});
+go_to_initial_state();
 
-  std::vector<geometry_msgs::PointStamped> area_front;
-  area_front.push_back(make_point(0.5, 0.45, 0.5));
-  area_front.push_back(make_point(0.5, -0.45, 0.5));
-  area_front.push_back(make_point(0.3, -0.45, 0.5));
-  area_front.push_back(make_point(0.3, 0.45, 0.5));
+rotate_joint("base", M_PI / 2);
+scan_sub_area({make_point(0.10, 0.45, 0.5), make_point(0.10, 0.40, 0.5),
+make_point(-0.10, 0.40, 0.5), make_point(-0.10, 0.45, 0.5)});
+go_to_initial_state();
 
-  scan_sub_area(area_front);
+rotate_joint("base", -M_PI / 2);
+scan_sub_area({make_point(0.10, -0.45, 0.5), make_point(0.10, -0.40, 0.5),
+make_point(-0.10, -0.40, 0.5), make_point(-0.10, -0.45, 0.5)});
+go_to_initial_state();
 
-  if (!go_to_initial_state()) {
-    ROS_ERROR("Failed to return to initial state.");
-    return false;
-  }
+scan_sub_area({make_point(-0.5, -0.45, 0.5), make_point(-0.5, 0.45, 0.5),
+make_point(-0.40, 0.45, 0.5), make_point(-0.40, -0.45, 0.5)});
 
-  rotate_joint("base", M_PI / 2.0);
+build_octomap_from_accumulated_clouds();
 
-  std::vector<geometry_msgs::PointStamped> area_left;
-  area_left.push_back(make_point(0.10, 0.45, 0.5));
-  area_left.push_back(make_point(0.10, 0.40, 0.5));
-  area_left.push_back(make_point(-0.10, 0.40, 0.5));
-  area_left.push_back(make_point(-0.10, 0.45, 0.5));
-  scan_sub_area(area_left);
+std::vector<DetectedObj> det;
+extract_objects(*latest_octree_, true, det);
 
-  if (!go_to_initial_state()) {
-    ROS_ERROR("Failed to return to initial state.");
-    return false;
-  }
-
-  rotate_joint("base", -M_PI / 2.0);
-
-  std::vector<geometry_msgs::PointStamped> area_right;
-  area_right.push_back(make_point(0.10, -0.45, 0.5));
-  area_right.push_back(make_point(0.10, -0.40, 0.5));
-  area_right.push_back(make_point(-0.10, -0.40, 0.5));
-  area_right.push_back(make_point(-0.10, -0.45, 0.5));
-  scan_sub_area(area_right);
-
-  if (!go_to_initial_state()) {
-    ROS_ERROR("Failed to return to initial state.");
-    return false;
-  }
-
-  std::vector<geometry_msgs::PointStamped> area_back;
-  area_back.push_back(make_point(-0.5, -0.45, 0.5));
-  area_back.push_back(make_point(-0.5, 0.45, 0.5));
-  area_back.push_back(make_point(-0.40, 0.45, 0.5));
-  area_back.push_back(make_point(-0.40, -0.45, 0.5));
-  scan_sub_area(area_back);
-
-  build_octomap_from_accumulated_clouds();
-
-  extract_objects(*latest_octree_, true);
-
-  // publishAccumulatedCloud();
-  // clusterAccumulatedPointCloud();
-  return true;
+int cnt_nought = 0, cnt_cross = 0;
+for (auto &d : det) {
+if (d.category == "object") {
+if (d.shape == "nought") ++cnt_nought;
+else if (d.shape == "cross") ++cnt_cross;
 }
+}
+
+if (cnt_nought == 0 && cnt_cross == 0) {
+ROS_ERROR("No object detected.");
+return false;
+}
+
+std::string target_shape = (cnt_nought > cnt_cross)
+             ? "nought"
+             : (cnt_cross > cnt_nought ? "cross"
+                                       : (rand() % 2 ? "nought" : "cross"));
+
+DetectedObj basket{}, target{};
+bool basket_ok = false, target_ok = false;
+
+for (auto &d : det) {
+if (!basket_ok && d.category == "basket") {
+basket = d;
+basket_ok = true;
+}
+if (!target_ok && d.category == "object" && d.shape == target_shape) {
+target = d;
+target_ok = true;
+}
+}
+
+if (!basket_ok || !target_ok) {
+ROS_ERROR("Basket or target object missing.");
+return false;
+}
+go_to_initial_state();
+
+geometry_msgs::PointStamped obj_pt = make_point(target.centroid.x,
+                              target.centroid.y,
+                              target.centroid.z);
+geometry_msgs::PointStamped bask_pt = make_point(basket.centroid.x,
+                               basket.centroid.y,
+                               basket.centroid.z);
+
+if (!move_to_pose(obj_pt, 0.50, true)) return false;
+
+ros::Rate r(10);
+int w = 0;
+cloud_received_ = false;
+while (!cloud_received_ && w++ < 50) r.sleep();
+
+if (!cloud_received_) {
+ROS_ERROR("No cloud.");
+return false;
+}
+
+// Transform to world frame
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr transf(new pcl::PointCloud<pcl::PointXYZRGB>);
+pcl_ros::transformPointCloud("world", *latest_cloud_rgb, *transf, tf_buffer_);
+
+// 保留顶层 & 再根据 OctoMap voxel keys 过滤
+auto filtered = filterByOctomapVoxels(transf, target.voxel_keys, *latest_octree_);
+// ✅ 可视化过滤后的点云
+publishCloud<pcl::PointXYZRGB>(filtered, "world");
+
+ROS_INFO("Filtered cloud published");
+
+// hull & corner
+auto [hull, poly] = computeConvexHull(filtered);
+auto corners = extract_corner_points(hull, poly, 1, "world");
+
+geometry_msgs::PointStamped grasp_pt = computeGraspPoint(target.centroid, corners, target_shape);
+geometry_msgs::Vector3 offset = computeOffsetVector(grasp_pt, target.centroid);
+geometry_msgs::PointStamped place_pt = computeAdjustedPlacementPoint(bask_pt, offset);
+// publish the grasp point
+publishConvexHullMarker(corners, marker_pub_, 0);
+publishGraspPointMarker(grasp_pt, grasp_point_pub_, 1);
+publishBasketMarker(bask_pt, 0);
+// publish accumulated cloud
+publishAccumulatedCloud();
+
+double yaw = compute_orientation(hull, grasp_pt) + compute_yaw_offset(target_shape);
+
+ROS_INFO("Place point: (%.3f, %.3f, %.3f)",
+         place_pt.point.x, place_pt.point.y, place_pt.point.z);
+
+if (!cartesian_grasp_and_place(grasp_pt, place_pt, yaw)) {
+ROS_ERROR("Pick-place fail.");
+return false;
+}
+
+ROS_INFO("Task-3 done: picked a %s and dropped into basket.", target_shape.c_str());
+return true;
+}
+
+
+void cw2::publishBasketMarker(
+  const geometry_msgs::PointStamped& basket_point,
+  int id
+) {
+  visualization_msgs::Marker marker;
+  marker.header.frame_id = "world";  // 如果你的basket_point是相对于world的，就写world
+  marker.header.stamp = ros::Time::now();
+  marker.ns = "basket_marker";
+  marker.id = id;
+  marker.type = visualization_msgs::Marker::SPHERE;
+  marker.action = visualization_msgs::Marker::ADD;
+
+  marker.pose.position = basket_point.point;
+  marker.pose.orientation.w = 1.0;
+
+  marker.scale.x = 0.05;
+  marker.scale.y = 0.05;
+  marker.scale.z = 0.05;
+
+  marker.color.r = 0.0f;
+  marker.color.g = 1.0f;
+  marker.color.b = 1.0f;
+  marker.color.a = 1.0;
+
+  marker.lifetime = ros::Duration(0.0);
+
+  basket_pub_.publish(marker);
+}
+
+
+
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr cw2::filterByOctomapVoxels(
+  const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& input_cloud,
+  const std::unordered_set<octomap::OcTreeKey, cw2::KeyHash>& keys,
+  const octomap::OcTree& tree)
+{
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr output(new pcl::PointCloud<pcl::PointXYZRGB>);
+  output->header = input_cloud->header;
+  output->is_dense = input_cloud->is_dense;
+  output->height = 1;
+
+  for (const auto& pt : input_cloud->points) {
+    if (std::isnan(pt.x) || std::isnan(pt.y) || std::isnan(pt.z)) continue;
+
+    octomap::OcTreeKey key;
+    if (tree.coordToKeyChecked(pt.x, pt.y, pt.z, key)) {
+      if (keys.count(key)) {
+        output->points.push_back(pt);
+      }
+    }
+  }
+
+  output->width = static_cast<uint32_t>(output->points.size());
+  return output;
+}
+
+
 
 void cw2::clusterAccumulatedPointCloud()
 {
@@ -1079,142 +1197,120 @@ void cw2::publishAccumulatedCloud()
 //  - resolution : tree.getResolution()，自动用于 Z 坐标换算
 //  - neighbor26 : true = 26邻接, false = 6邻接
 ///////////////////////////////////////////////////////////////////////////////
-bool cw2::extract_objects(const octomap::OcTree& tree, bool neighbor26)
+// ======================================================
+// 直接在 OctoMap 上做连通域提取并打印每个物体的高度
+// ======================================================
+bool cw2::extract_objects(const octomap::OcTree& tree,
+  bool                   neighbor26,
+  std::vector<DetectedObj>& out)
 {
-  using Key = octomap::OcTreeKey;
-  struct KeyHash {
-      size_t operator()(const Key& k) const {
-        return (static_cast<size_t>(k.k[0]) << 42) ^
-               (static_cast<size_t>(k.k[1]) << 21) ^
-               static_cast<size_t>(k.k[2]);
-      }
-  };
+using Key = octomap::OcTreeKey;
 
-  // ───────────────────────────────────
-  const double res = tree.getResolution();
-  const int min_voxel_threshold = 200;     // 忽略太小的簇
-  const int deltas[26][3] = {              // 26/6‑邻域偏移表
-      {-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1},
-      {-1,-1,0},{-1,1,0},{1,-1,0},{1,1,0},
-      {-1,0,-1},{-1,0,1},{1,0,-1},{1,0,1},
-      {0,-1,-1},{0,-1,1},{0,1,-1},{0,1,1},
-      {-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1},
-      {1,-1,-1},{1,-1,1},{1,1,-1},{1,1,1}
-  };
-  // ───────────────────────────────────
+const double res = tree.getResolution();
+const int    min_voxel_threshold = 200;
+const int deltas[26][3] = {            // 26‑邻接表
+{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1},
+{-1,-1,0},{-1,1,0},{1,-1,0},{1,1,0},
+{-1,0,-1},{-1,0,1},{1,0,-1},{1,0,1},
+{0,-1,-1},{0,-1,1},{0,1,-1},{0,1,1},
+{-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1},
+{1,-1,-1},{1,-1,1},{1,1,-1},{1,1,1} };
 
-  /* ---------- 1. 收集全部占据体素 ---------- */
-  std::unordered_set<Key, KeyHash> occupied;
-  for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it)
-    if (tree.isNodeOccupied(*it))
-      occupied.insert(it.getKey());
+/* ---------- 1. 收集所有占据体素 ---------- */
+std::unordered_set<Key, cw2::KeyHash> occ;
+for (auto it = tree.begin_leafs(); it != tree.end_leafs(); ++it)
+if (tree.isNodeOccupied(*it)) occ.insert(it.getKey());
 
-  if (occupied.empty()) {
-    ROS_WARN("OctoMap contains no occupied voxels.");
-    return false;
-  }
+if (occ.empty()) { ROS_WARN("OctoMap is empty."); return false; }
 
-  /* ---------- 2. flood‑fill 连通域 ---------- */
-  std::unordered_set<Key, KeyHash> visited;
-  std::vector<Key> stack;
-  stack.reserve(2048);
+/* ---------- 2. flood‑fill ---------- */
+std::unordered_set<Key, cw2::KeyHash> vis;
+std::vector<Key> stack; stack.reserve(2048);
 
-  int obj_id = 1;
+int obj_idx = 1;
+for (const Key& seed : occ)
+{
+if (vis.count(seed)) continue;
 
-  for (const Key& seed : occupied)
-  {
-    if (visited.count(seed)) continue;
+/* -- 聚类基本属性 -- */
+double min_x=1e9,max_x=-1e9,min_y=1e9,max_y=-1e9,min_z=1e9,max_z=-1e9;
+size_t voxel_cnt = 0;
+std::unordered_set<Key, cw2::KeyHash> cluster;
+stack.clear();   stack.push_back(seed);   vis.insert(seed);
 
-    // 统计极值 & 保存簇体素
-    double min_x=1e9,max_x=-1e9,min_y=1e9,max_y=-1e9,min_z=1e9,max_z=-1e9;
-    std::unordered_set<Key,KeyHash> cluster_voxels;
-    size_t voxel_cnt = 0;
+while (!stack.empty()) {
+Key cur = stack.back(); stack.pop_back();
+voxel_cnt++; cluster.insert(cur);
+octomap::point3d p = tree.keyToCoord(cur);
+min_x = std::min(min_x, (double)p.x()); max_x = std::max(max_x, (double)p.x());
+min_y = std::min(min_y, (double)p.y()); max_y = std::max(max_y, (double)p.y());
+min_z = std::min(min_z, (double)p.z()); max_z = std::max(max_z, (double)p.z());
 
-    stack.clear();  stack.push_back(seed);  visited.insert(seed);
-
-    while(!stack.empty()){
-      Key cur = stack.back(); stack.pop_back();
-      voxel_cnt++;  cluster_voxels.insert(cur);
-
-      octomap::point3d p = tree.keyToCoord(cur);
-      min_x=std::min(min_x,(double)p.x());  max_x=std::max(max_x,(double)p.x());
-      min_y=std::min(min_y,(double)p.y());  max_y=std::max(max_y,(double)p.y());
-      min_z=std::min(min_z,(double)p.z());  max_z=std::max(max_z,(double)p.z());
-
-      int nb_num = neighbor26?26:6;
-      for(int i=0;i<nb_num;++i){
-        Key nb(cur[0]+deltas[i][0],cur[1]+deltas[i][1],cur[2]+deltas[i][2]);
-        if(occupied.count(nb) && !visited.count(nb)){
-          visited.insert(nb);
-          stack.push_back(nb);
-        }
-      }
-    }
-
-    if (voxel_cnt < min_voxel_threshold) continue;
-
-    /* ---------- 3. 高度分类 ---------- */
-    double height = max_z - min_z + res;   // 物体整体高度
-    std::string category;
-    if (height > 0.05)            category = "obstacle";
-    else if (height >= 0.03)      category = "basket";
-    else                          category = "object";
-
-    /* ---------- 4. 若为 object, 进一步判断形状 ---------- */
-    std::string shape = "N/A";
-    geometry_msgs::Point centroid_msg;
-
-    if (category == "object")
-    {
-      // 4‑1 提取“表面层”：z >= max_z - res/2
-      std::vector<octomap::point3d> surface_pts;
-      octomap::OcTreeKey max_z_key = tree.coordToKey(0.0, 0.0, max_z);  // 取出 z 层编号
-      for (const Key& k : cluster_voxels)
-      {
-        if (k[2] == max_z_key[2])   // 表面层（key在z轴方向相等）
-          surface_pts.emplace_back(tree.keyToCoord(k));
-      }
-
-
-      // 4‑2 计算质心
-      if(!surface_pts.empty()){
-        double sx=0,sy=0,sz=0;
-        for(const auto& p:surface_pts){ sx+=p.x(); sy+=p.y(); sz+=p.z(); }
-        centroid_msg.x = sx/surface_pts.size();
-        centroid_msg.y = sy/surface_pts.size();
-        centroid_msg.z = sz/surface_pts.size();
-      }
-
-      /* 4‑3 判断中心空心：若表面层中心 3×3×1 体素内有占据，则 cross，否则 nought */
-      Key center_key = tree.coordToKey(centroid_msg.x,
-                                       centroid_msg.y,
-                                       max_z);          // 只看表面层
-      bool center_occupied = false;
-      for(int dx=-1;dx<=1 && !center_occupied;++dx)
-        for(int dy=-1;dy<=1 && !center_occupied;++dy)
-        {
-          Key ck(center_key[0]+dx, center_key[1]+dy, center_key[2]);
-          if(cluster_voxels.count(ck)){
-            center_occupied = true;
-            break;
-          }
-        }
-
-      shape = center_occupied ? "cross" : "nought";
-    }
-
-    /* ---------- 5. 输出 ---------- */
-    ROS_INFO("Object %d: voxels=%zu  height=%.3f  category=%s  shape=%s",
-             obj_id++, voxel_cnt, height, category.c_str(), shape.c_str());
-
-    if(category=="object"){
-      ROS_INFO("         centroid = (%.3f, %.3f, %.3f)",
-               centroid_msg.x, centroid_msg.y, centroid_msg.z);
-      // 需要的话这里可发布 Marker 可视化质心
-    }
-  }
-  return true;
+int nb = neighbor26 ? 26 : 6;
+for (int i = 0; i < nb; ++i) {
+Key nbk(cur[0]+deltas[i][0], cur[1]+deltas[i][1], cur[2]+deltas[i][2]);
+if (occ.count(nbk) && !vis.count(nbk)) { vis.insert(nbk); stack.push_back(nbk); }
 }
+}
+if (voxel_cnt < min_voxel_threshold) continue;
+
+/* ---------- 3. 分类 ---------- */
+double height = max_z - min_z + res;
+std::string category;
+if      (height > 0.05) category = "obstacle";
+else if (height >= 0.03) category = "basket";
+else                     category = "object";
+
+std::string shape = "N/A";
+geometry_msgs::Point centroid_pt{};   // 默认 (0,0,0)
+
+/* ---------- 4. 质心计算 ---------- */
+if (category == "object")      // 原有逻辑：只用顶部表面平均
+{
+octomap::OcTreeKey topKey = tree.coordToKey(0,0,max_z);
+std::vector<octomap::point3d> surf;
+for (const Key& k : cluster)
+if (k[2] == topKey[2]) surf.emplace_back(tree.keyToCoord(k));
+
+if (!surf.empty()) {
+for (const auto& p : surf) {
+centroid_pt.x += p.x(); centroid_pt.y += p.y(); centroid_pt.z += p.z();
+}
+centroid_pt.x /= surf.size(); centroid_pt.y /= surf.size(); centroid_pt.z /= surf.size();
+}
+
+/* --- 十字 / 圆环判别 --- */
+Key center_key = tree.coordToKey(centroid_pt.x, centroid_pt.y, max_z);
+bool center_occ = false;
+for (int dx=-1; dx<=1 && !center_occ; ++dx)
+for (int dy=-1; dy<=1 && !center_occ; ++dy) {
+Key ck(center_key[0]+dx, center_key[1]+dy, center_key[2]);
+if (cluster.count(ck)) { center_occ = true; break; }
+}
+shape = center_occ ? "cross" : "nought";
+}
+else if (category == "basket")   // 👈 新增：篮子质心 = 包围盒中心
+{
+centroid_pt.x = 0.5 * (min_x + max_x);
+centroid_pt.y = 0.5 * (min_y + max_y);
+centroid_pt.z = 0.5 * (min_z + max_z);
+}
+/* obstacle 无需质心 */
+
+/* ---------- 5. 保存结果 ---------- */
+DetectedObj d;
+d.centroid    = centroid_pt;
+d.category    = category;
+d.shape       = shape;
+d.voxel_keys  = cluster;
+out.push_back(d);
+
+ROS_INFO("Obj%02d vox=%zu h=%.3f  cat=%s  shape=%s",
+obj_idx++, voxel_cnt, height, category.c_str(), shape.c_str());
+}
+return true;
+}
+
 
 
 
@@ -1451,6 +1547,7 @@ void cw2::pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
 ///////////////////////////////////////////////////////////////////////////////
 bool cw2::move_to_pose(const geometry_msgs::PointStamped& target, double z_offset, bool reset_orientation)
 {
+
   geometry_msgs::Pose target_pose;
   target_pose.position.x = target.point.x;
   target_pose.position.y = target.point.y;
@@ -1488,7 +1585,7 @@ bool cw2::move_to_pose(const geometry_msgs::PointStamped& target, double z_offse
   if (success) {
     arm_group_.move();
   } else {
-    ROS_ERROR("Arm planning failed!");
+    ROS_ERROR("In move_to_pose(): Arm planning failed!");
   }
 
   return success;

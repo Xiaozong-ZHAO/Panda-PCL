@@ -73,6 +73,23 @@ public:
   bool t3_callback(cw2_world_spawner::Task3Service::Request &request,
                    cw2_world_spawner::Task3Service::Response &response);
 
+  struct KeyHash {
+  size_t operator()(const octomap::OcTreeKey& k) const {
+    return (static_cast<size_t>(k.k[0]) << 42) ^
+            (static_cast<size_t>(k.k[1]) << 21) ^
+            static_cast<size_t>(k.k[2]);
+  }
+};
+  struct DetectedObj
+  {
+    geometry_msgs::Point centroid;   // 世界系
+    std::string category;            // obstacle / basket / object
+    std::string shape;               // cross / nought / "N/A"
+    
+    // ✅ 新增字段，用于存储物体的体素 key 集合
+    std::unordered_set<octomap::OcTreeKey, KeyHash> voxel_keys;
+  };
+
   // 控制函数
   bool move_to_pose(const geometry_msgs::PointStamped& target, double z_offset, bool reset_orientation);
   bool move_gripper(float width);
@@ -98,6 +115,10 @@ public:
   template <typename PointT>
   void publishCloud(const typename pcl::PointCloud<PointT>::Ptr& cloud,
                     const std::string& frame_id);
+  void publishBasketMarker(
+    const geometry_msgs::PointStamped& basket_point,
+    int id
+  );
 
   // ============== 模板版位姿估计函数(示例) ==============
   template <typename PointT>
@@ -228,6 +249,7 @@ private:
   ros::Publisher octomap_pub_;
   ros::Publisher accumulated_cloud_pub_;
   ros::Publisher cluster_marker_pub_;
+  ros::Publisher basket_pub_;
 
   std::vector<double> initial_joint_values_;
   geometry_msgs::Pose initial_ee_pose_;
@@ -242,12 +264,10 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   std::shared_ptr<octomap::OcTree> latest_octree_;
-  struct DetectedObj
-{
-  geometry_msgs::Point centroid;   // 世界系
-  std::string category;            // obstacle / basket / object
-  std::string shape;               // cross / nought / "N/A"
-};
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr filterByOctomapVoxels(
+    const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& input_cloud,
+    const std::unordered_set<octomap::OcTreeKey, KeyHash>& keys,
+    const octomap::OcTree& tree);
 
 
   // MoveIt groups
