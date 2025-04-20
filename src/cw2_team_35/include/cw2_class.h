@@ -124,6 +124,11 @@ public:
     const geometry_msgs::PointStamped& basket_point,
     int id
   );
+  void publishCentroidPointMarker(
+    const geometry_msgs::Point& centroid,
+    ros::Publisher& marker_pub,
+    int id
+  );
 
   // ============== 模板版位姿估计函数(示例) ==============
   template <typename PointT>

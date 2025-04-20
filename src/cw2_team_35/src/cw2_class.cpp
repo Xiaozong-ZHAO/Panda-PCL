@@ -31,7 +31,7 @@ cw2::cw2(ros::NodeHandle nh)
   grasp_arrow_pub_ = nh_.advertise<visualization_msgs::Marker>("/grasp_orientation_arrow", 1);
   centroid_pub_ = nh_.advertise<visualization_msgs::Marker>("/centroid_marker", 1);
   octomap_pub_ = nh_.advertise<octomap_msgs::Octomap>("/constructed_octomap", 1, true);
-  accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1, true);
+  accumulated_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/accumulated_cloud", 1, false);
   cluster_marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/cluster_centroids", 1);
   basket_pub_ = nh_.advertise<visualization_msgs::Marker>("/basket_marker", 1);
   latest_cloud_rgb.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
@@ -134,7 +134,7 @@ bool cw2::cartesian_grasp_and_place(
   }
 
   // 5. 闭合夹爪
-  move_gripper(0.00);
+  move_gripper(0.01);
 
   // 6. 记录当前抓取后的姿态作为统一姿态
   geometry_msgs::PoseStamped base_pose_stamped = arm_group_.getCurrentPose();
@@ -998,17 +998,21 @@ geometry_msgs::PointStamped bask_pt = make_point(basket.centroid.x,
                                basket.centroid.y,
                                basket.centroid.z);
 
+publishCentroidCircleMarker(target.centroid, 0.005, centroid_pub_, 99);
+
 if (!move_to_pose(obj_pt, 0.50, true)) return false;
 
-ros::Rate r(10);
-int w = 0;
-cloud_received_ = false;
-while (!cloud_received_ && w++ < 50) r.sleep();
-
-if (!cloud_received_) {
-ROS_ERROR("No cloud.");
-return false;
-}
+  // 3. 等待点云
+  ros::Rate rate(10);
+  int wait = 0;
+  while (!cloud_received_ && wait++ < 50) {
+    ROS_INFO_THROTTLE(1.0, "Waiting for point cloud...");
+    rate.sleep();
+  }
+  if (!cloud_received_) {
+    ROS_ERROR("No point cloud received after arm moved.");
+    return false;
+  }
 
 // Transform to world frame
 pcl::PointCloud<pcl::PointXYZRGB>::Ptr transf(new pcl::PointCloud<pcl::PointXYZRGB>);
@@ -1045,8 +1049,41 @@ ROS_ERROR("Pick-place fail.");
 return false;
 }
 
+go_to_initial_state();
+
 ROS_INFO("Task-3 done: picked a %s and dropped into basket.", target_shape.c_str());
 return true;
+}
+
+void cw2::publishCentroidPointMarker(
+  const geometry_msgs::Point& centroid,
+  ros::Publisher& marker_pub,
+  int id
+)
+{
+  visualization_msgs::Marker marker;
+  marker.header.frame_id = "world";  // 默认假设是 world frame
+  marker.header.stamp = ros::Time::now();
+  marker.ns = "centroid_point";
+  marker.id = id;
+  marker.type = visualization_msgs::Marker::SPHERE;
+  marker.action = visualization_msgs::Marker::ADD;
+
+  marker.pose.position = centroid;
+  marker.pose.orientation.w = 1.0;
+
+  marker.scale.x = 0.025;
+  marker.scale.y = 0.025;
+  marker.scale.z = 0.025;
+
+  marker.color.r = 1.0;
+  marker.color.g = 1.0;
+  marker.color.b = 0.0;  // 黄色质心
+  marker.color.a = 1.0;
+
+  marker.lifetime = ros::Duration(0.0);  // 永久显示
+
+  marker_pub.publish(marker);
 }
 
 
@@ -1105,89 +1142,6 @@ pcl::PointCloud<pcl::PointXYZRGB>::Ptr cw2::filterByOctomapVoxels(
   output->width = static_cast<uint32_t>(output->points.size());
   return output;
 }
-
-
-
-void cw2::clusterAccumulatedPointCloud()
-{
-  if (accumulated_cloud_->empty()) {
-    ROS_WARN("No data in accumulated_cloud_ for clustering.");
-    return;
-  }
-
-  // 1. 创建搜索树
-  pcl::search::KdTree<pcl::PointXYZRGB>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZRGB>);
-  tree->setInputCloud(accumulated_cloud_);
-
-  // 2. 聚类配置
-  std::vector<pcl::PointIndices> cluster_indices;
-  pcl::EuclideanClusterExtraction<pcl::PointXYZRGB> ec;
-  ec.setClusterTolerance(0.02);  // 最大点间距
-  ec.setMinClusterSize(100);     // 最小聚类点数
-  ec.setMaxClusterSize(25000);
-  ec.setSearchMethod(tree);
-  ec.setInputCloud(accumulated_cloud_);
-  ec.extract(cluster_indices);
-
-  int cluster_id = 0;
-  visualization_msgs::MarkerArray markers;
-
-  for (const auto& indices : cluster_indices)
-  {
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr cluster(new pcl::PointCloud<pcl::PointXYZRGB>);
-    pcl::copyPointCloud(*accumulated_cloud_, indices, *cluster);
-
-    // 3. 计算质心
-    Eigen::Vector4f centroid;
-    pcl::compute3DCentroid(*cluster, centroid);
-
-    // 4. 计算高度（z_max - z_min）
-    float z_min = std::numeric_limits<float>::max();
-    float z_max = -std::numeric_limits<float>::max();
-    for (const auto& pt : cluster->points)
-    {
-      if (!std::isnan(pt.z)) {
-        z_min = std::min(z_min, pt.z);
-        z_max = std::max(z_max, pt.z);
-      }
-    }
-    float height = z_max - z_min;
-
-    // 5. 输出信息
-    ROS_INFO("Cluster %d: size=%lu, centroid=(%.3f, %.3f, %.3f), height=%.3f m",
-             cluster_id, cluster->size(), centroid[0], centroid[1], centroid[2], height);
-
-    // 6. 可视化：显示聚类中心点
-    visualization_msgs::Marker marker;
-    marker.header.frame_id = "world";
-    marker.header.stamp = ros::Time::now();
-    marker.ns = "/cluster_centroids";
-    marker.id = cluster_id;
-    marker.type = visualization_msgs::Marker::SPHERE;
-    marker.action = visualization_msgs::Marker::ADD;
-    marker.pose.position.x = centroid[0];
-    marker.pose.position.y = centroid[1];
-    marker.pose.position.z = centroid[2];
-    marker.pose.orientation.w = 1.0;
-    marker.scale.x = 0.03;
-    marker.scale.y = 0.03;
-    marker.scale.z = 0.03;
-    marker.color.r = 1.0;
-    marker.color.g = 0.0;
-    marker.color.b = 0.0;
-    marker.color.a = 1.0;
-    marker.lifetime = ros::Duration(0.0);
-    markers.markers.push_back(marker);
-
-    ++cluster_id;
-  }
-
-  cluster_marker_pub_.publish(markers);
-
-  if (cluster_id == 0)
-    ROS_WARN("No clusters found in accumulated cloud.");
-}
-
 
 void cw2::publishAccumulatedCloud()
 {
@@ -1614,7 +1568,7 @@ bool cw2::move_to_pose(const geometry_msgs::PointStamped& target, double z_offse
 bool cw2::move_gripper(float width)
 {
   const float gripper_max = 0.10;
-  const float gripper_min = 0.015;
+  const float gripper_min = 0.01;
 
   // clamp一下
   width = std::max(gripper_min, std::min(gripper_max, width));
