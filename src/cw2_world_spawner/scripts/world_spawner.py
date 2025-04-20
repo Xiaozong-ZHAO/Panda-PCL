@@ -94,8 +94,7 @@ BASKET_LOCATIONS = [(-0.41, -0.36),
                     (-0.41,  0.36)]
 
 # define the variety of spawned objects, these values are defined in .sdf files
-# POSSIBLE_SHAPES = ["nought", "cross"]
-POSSIBLE_SHAPES = ["cross"]
+POSSIBLE_SHAPES = ["nought", "cross"]
 POSSIBLE_SIZES = ["40", "30", "20"]
 POSSIBLE_COLOURS = {'purple': [0.8, 0.1, 0.8],
                     'red':    [0.8, 0.1, 0.1], 
