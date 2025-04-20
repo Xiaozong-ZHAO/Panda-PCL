@@ -49,6 +49,10 @@ bool cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
 {
   ROS_INFO("=== Task 1 Callback Triggered ===");
 
+  auto initial = make_point(0.5, 0.0, 0.5);
+  if (!move_to_pose(initial, 0.0, true)) return false;
+  save_initial_joint_and_pose();
+
   // 1. 保存 shape_type，用于加载模型
   std::string pkg_path = ros::package::getPath("cw2_team_35");
   std::string model_path;
@@ -71,19 +75,18 @@ bool cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
     return false;
   }
 
+  pcl::PointCloud<pcl::PointXYZRGB>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZRGB>);
+  pcl_ros::transformPointCloud("world", *latest_cloud_rgb, *transformed, tf_buffer_);
   auto pass_filtered = filterPassThrough<pcl::PointXYZRGB>(
-      latest_cloud_rgb,    // 输入点云
+      transformed,    // 输入点云
       "z",                 // 过滤字段
-      0.0f,                // z最小
+      0.03f,                // z最小
       0.4f                 // z最大
   );
 
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr transformed(new pcl::PointCloud<pcl::PointXYZRGB>);
-  pcl_ros::transformPointCloud("world", *pass_filtered, *transformed, tf_buffer_);
-
   // 发布滤波后的点云
-  publishCloud<pcl::PointXYZRGB>(transformed, "world");
-  auto [hull, polygon] = computeConvexHull(transformed);
+  publishCloud<pcl::PointXYZRGB>(pass_filtered, "world");
+  auto [hull, polygon] = computeConvexHull(pass_filtered);
   std::vector<geometry_msgs::PointStamped> corners = extract_corner_points(hull, polygon, 1, "world");
   publishConvexHullMarker(corners, marker_pub_, 0);
   geometry_msgs::Point centroid = computeCentroid(hull);
@@ -100,7 +103,7 @@ bool cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
     ROS_ERROR("Cartesian grasping failed!");
     return false;
   }
-
+  go_to_initial_state();
   return true;
 }
 
@@ -131,7 +134,7 @@ bool cw2::cartesian_grasp_and_place(
   }
 
   // 5. 闭合夹爪
-  move_gripper(0.015);
+  move_gripper(0.00);
 
   // 6. 记录当前抓取后的姿态作为统一姿态
   geometry_msgs::PoseStamped base_pose_stamped = arm_group_.getCurrentPose();
@@ -289,7 +292,7 @@ geometry_msgs::PointStamped cw2::computeGraspPoint(
       }
     }
 
-    float alpha = 0.60f;  // 越接近1 → 越靠近 y_max_pt
+    float alpha = 0.70f;  // 越接近1 → 越靠近 y_max_pt
     grasp_point.point.x = (1 - alpha) * centroid.x + alpha * y_max_pt.x;
     grasp_point.point.y = (1 - alpha) * centroid.y + alpha * y_max_pt.y;
     grasp_point.point.z = centroid.z + 0.015;
@@ -309,7 +312,18 @@ double cw2::compute_orientation(
   double dx = grasp_point.point.x - centroid[0];
   double dy = grasp_point.point.y - centroid[1];
 
-  double yaw = std::atan2(dy, dx);
+  double yaw = std::atan2(dy, dx);  // 原始朝向
+
+  // 限制在 ±166° （约 2.9 弧度）
+  const double max_yaw_rad = 166.0 * M_PI / 180.0;
+
+  if (std::abs(yaw) > max_yaw_rad) {
+    yaw += (yaw > 0) ? -M_PI : M_PI;  // 旋转 180°，方向反过来
+    // 限制在 [-π, π]，避免超出范围
+    if (yaw > M_PI) yaw -= 2 * M_PI;
+    if (yaw < -M_PI) yaw += 2 * M_PI;
+  }
+
   return yaw;
 }
 
@@ -1600,7 +1614,7 @@ bool cw2::move_to_pose(const geometry_msgs::PointStamped& target, double z_offse
 bool cw2::move_gripper(float width)
 {
   const float gripper_max = 0.10;
-  const float gripper_min = 0.028;
+  const float gripper_min = 0.015;
 
   // clamp一下
   width = std::max(gripper_min, std::min(gripper_max, width));
