@@ -926,6 +926,9 @@ bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &,
   cw2_world_spawner::Task3Service::Response &)
 {
 ROS_INFO("Task-3 start.");
+accumulated_cloud_->clear();
+cloud_received_ = false;
+if (latest_octree_) latest_octree_->clear();
 
 auto initial = make_point(0.5, 0.0, 0.5);
 if (!move_to_pose(initial, 0.0, true)) return false;
@@ -949,6 +952,7 @@ scan_sub_area({make_point(-0.5, -0.45, 0.5), make_point(-0.5, 0.45, 0.5),
 make_point(-0.40, 0.45, 0.5), make_point(-0.40, -0.45, 0.5)});
 
 build_octomap_from_accumulated_clouds();
+publishAccumulatedCloud();
 
 std::vector<DetectedObj> det;
 extract_objects(*latest_octree_, true, det);
@@ -1037,7 +1041,7 @@ publishConvexHullMarker(corners, marker_pub_, 0);
 publishGraspPointMarker(grasp_pt, grasp_point_pub_, 1);
 publishBasketMarker(bask_pt, 0);
 // publish accumulated cloud
-publishAccumulatedCloud();
+
 
 double yaw = compute_orientation(hull, grasp_pt) + compute_yaw_offset(target_shape);
 
