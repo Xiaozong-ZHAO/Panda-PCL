@@ -67,6 +67,9 @@ include_directories(
 add_library(${PROJECT_NAME}_cw2_class_lib
   src/cw2_class.cpp
   src/cw2_arm_control.cpp
+  src/cw2_pcl_helper.cpp
+  src/cw2_debug_helper.cpp
+  src/cw2_octomap_helper.cpp
 )
 
 add_dependencies(${PROJECT_NAME}_cw2_class_lib

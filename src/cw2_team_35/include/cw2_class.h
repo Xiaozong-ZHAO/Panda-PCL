@@ -99,14 +99,11 @@ public:
   bool move_to_pose(const geometry_msgs::PointStamped& target, double z_offset, bool reset_orientation);
   bool move_gripper(float width);
   bool rotate_end_effector(double yaw);
-  bool rotate_end_effector_roll_offset(double delta_roll);
-  bool rotate_end_effector_pitch_offset(double delta_pitch);
   bool rotate_base_joint(double delta_angle_rad);
   bool rotate_joint(const std::string& joint_name, double delta_angle_rad);
 
   // ===== Cloud Processing =====
   void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg);
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr filterOutGreenPoints(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud);
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr filterTopLayer(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr &input_cloud);
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr filterByOctomapVoxels(const pcl::PointCloud<pcl::PointXYZRGB>::Ptr& input_cloud,
                                                                 const std::unordered_set<octomap::OcTreeKey, KeyHash>& keys,
@@ -160,8 +157,6 @@ public:
                                                                  const std::vector<pcl::Vertices>& polygons,
                                                                  size_t top_k,
                                                                  const std::string& frame_id);
-
-  bool run_fpfh_alignment(const std::string& object_path, const std::string& scene_path);
   bool extract_objects(const octomap::OcTree& tree, bool neighbor26, std::vector<DetectedObj>& out);
   void build_octomap_from_accumulated_clouds();
   void publishAccumulatedCloud();
