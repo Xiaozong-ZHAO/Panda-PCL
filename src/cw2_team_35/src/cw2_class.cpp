@@ -113,7 +113,7 @@ bool cw2::cartesian_grasp_and_place(
   move_gripper(0.10);
 
   // 2. 移动到抓取点上方
-  if (!move_to_pose(grasp_point, 0.15, false)) {
+  if (!move_to_pose(grasp_point, 0.15, true)) {
     ROS_ERROR("Failed to move above the object.");
     return false;
   }
@@ -125,13 +125,13 @@ bool cw2::cartesian_grasp_and_place(
   }
 
   // 4. 降低准备抓取
-  if (!move_to_pose(grasp_point, 0.08, false)) {
+  if (!move_to_pose(grasp_point, 0.07, false)) {
     ROS_ERROR("Failed to move to grasp height.");
     return false;
   }
 
   // 5. 闭合夹爪
-  move_gripper(0.03);
+  move_gripper(0.015);
 
   // 6. 记录当前抓取后的姿态作为统一姿态
   geometry_msgs::PoseStamped base_pose_stamped = arm_group_.getCurrentPose();
@@ -141,7 +141,7 @@ bool cw2::cartesian_grasp_and_place(
   std::vector<geometry_msgs::Pose> waypoints;
 
   geometry_msgs::Pose lift_pose = base_pose;
-  lift_pose.position.z = grasp_point.point.z + 0.2;
+  lift_pose.position.z = grasp_point.point.z + 0.5;
   lift_pose.orientation = base_pose.orientation;
   waypoints.push_back(lift_pose);
 
@@ -156,7 +156,7 @@ bool cw2::cartesian_grasp_and_place(
   waypoints.push_back(move_x_pose);
 
   geometry_msgs::Pose lower_pose = move_x_pose;
-  lower_pose.position.z = place_point.point.z + 0.2;
+  lower_pose.position.z = place_point.point.z + 0.5;
   lower_pose.orientation = base_pose.orientation;
   waypoints.push_back(lower_pose);
 
@@ -176,10 +176,10 @@ bool cw2::cartesian_grasp_and_place(
     // fallback：使用 move_to_pose 分段移动
     // geometry_msgs::PointStamped mid1 = place_point;
     geometry_msgs::PointStamped mid1 = grasp_point;
-    mid1.point.z = grasp_point.point.z + 0.2;
+    mid1.point.z = grasp_point.point.z + 0.5;
 
     geometry_msgs::PointStamped mid2 = place_point;
-    mid2.point.z = place_point.point.z + 0.2;
+    mid2.point.z = place_point.point.z + 0.5;
 
     if (!move_to_pose(mid1, 0.0, false)) {
       ROS_ERROR("Fallback move_to_pose: mid1 failed.");
@@ -289,8 +289,9 @@ geometry_msgs::PointStamped cw2::computeGraspPoint(
       }
     }
 
-    grasp_point.point.x = (centroid.x + y_max_pt.x) / 2.0;
-    grasp_point.point.y = (centroid.y + y_max_pt.y) / 2.0;
+    float alpha = 0.60f;  // 越接近1 → 越靠近 y_max_pt
+    grasp_point.point.x = (1 - alpha) * centroid.x + alpha * y_max_pt.x;
+    grasp_point.point.y = (1 - alpha) * centroid.y + alpha * y_max_pt.y;
     grasp_point.point.z = centroid.z + 0.015;
   }
 

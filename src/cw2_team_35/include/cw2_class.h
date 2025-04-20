@@ -12,6 +12,9 @@
 // MoveIt
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_interface/planning_interface.h>
+#include <moveit_msgs/PlanningScene.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.h>
+#include <octomap_msgs/conversions.h>        // fullMapToMsg
 
 // PCL / TF
 #include <pcl_ros/point_cloud.h>
@@ -89,6 +92,8 @@ public:
     // ✅ 新增字段，用于存储物体的体素 key 集合
     std::unordered_set<octomap::OcTreeKey, KeyHash> voxel_keys;
   };
+
+  moveit::planning_interface::PlanningSceneInterface psi_;
 
   // 控制函数
   bool move_to_pose(const geometry_msgs::PointStamped& target, double z_offset, bool reset_orientation);
