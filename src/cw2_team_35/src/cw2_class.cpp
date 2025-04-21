@@ -131,6 +131,12 @@ bool cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
                       cw2_world_spawner::Task2Service::Response &response)
 {
   ROS_INFO("Task 2 callback triggered.");
+
+  // Move to initial pose and record state
+  auto initial = make_point(0.5, 0.0, 0.5);
+  if (!move_to_pose(initial, 0.0, true)) return false;
+  save_initial_joint_and_pose();
+
   std::vector<std::string> ref_shapes;
 
   // Detect and classify each reference object
@@ -198,7 +204,7 @@ bool cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
     ROS_WARN("=> Mystery object does not match any reference object.");
   }
   ROS_INFO("/////////////////////////////////////////////////////////////////////");
-
+  go_to_initial_state();
   return true;
 }
 
@@ -211,127 +217,145 @@ bool cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
  * @return false on any failure.
  */
 bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &,
-                      cw2_world_spawner::Task3Service::Response &)
+  cw2_world_spawner::Task3Service::Response &response)
 {
-  ROS_INFO("Task-3 start.");
+ROS_INFO("Task-3 start.");
 
-  // Clear previous data
-  accumulated_cloud_->clear();
-  cloud_received_ = false;
-  if (latest_octree_) latest_octree_->clear();
+// Clear previous data
+accumulated_cloud_->clear();
+cloud_received_ = false;
+if (latest_octree_) latest_octree_->clear();
 
-  // Move to initial pose and record state
-  auto initial = make_point(0.5, 0.0, 0.5);
-  if (!move_to_pose(initial, 0.0, true)) return false;
-  save_initial_joint_and_pose();
+// Move to initial pose and record state
+auto initial = make_point(0.5, 0.0, 0.5);
+if (!move_to_pose(initial, 0.0, true)) return false;
+save_initial_joint_and_pose();
 
-  // Perform four sub-area scans at different base rotations
-  scan_sub_area({make_point(0.5,  0.45, 0.5), make_point(0.5, -0.45, 0.5),
-                 make_point(0.3, -0.45, 0.5), make_point(0.3,  0.45, 0.5)});
-  go_to_initial_state();
-  rotate_joint("base",  M_PI / 2);
-  scan_sub_area({make_point(0.10,  0.45, 0.5), make_point(0.10,  0.40, 0.5),
-                 make_point(-0.10, 0.40, 0.5), make_point(-0.10, 0.45, 0.5)});
-  go_to_initial_state();
-  rotate_joint("base", -M_PI / 2);
-  scan_sub_area({make_point(0.10, -0.45, 0.5), make_point(0.10, -0.40, 0.5),
-                 make_point(-0.10, -0.40, 0.5), make_point(-0.10, -0.45, 0.5)});
-  go_to_initial_state();
-  scan_sub_area({make_point(-0.5,  -0.45, 0.5), make_point(-0.5,  0.45, 0.5),
-                 make_point(-0.40, 0.45, 0.5), make_point(-0.40, -0.45, 0.5)});
+// Perform four sub-area scans at different base rotations
+// Front sub area
+scan_sub_area({make_point(0.5,  0.45, 0.5), make_point(0.5, -0.45, 0.5),
+make_point(0.3, -0.45, 0.5), make_point(0.3,  0.45, 0.5)});
+go_to_initial_state();
+// Left sub area
+rotate_joint("base",  M_PI / 2);
+scan_sub_area({make_point(0.10,  0.45, 0.5), make_point(0.10,  0.40, 0.5),
+make_point(-0.10, 0.40, 0.5), make_point(-0.10, 0.45, 0.5)});
+go_to_initial_state();
+// Right sub area
+rotate_joint("base", -M_PI / 2);
+scan_sub_area({make_point(0.10, -0.45, 0.5), make_point(0.10, -0.40, 0.5),
+make_point(-0.10, -0.40, 0.5), make_point(-0.10, -0.45, 0.5)});
+go_to_initial_state();
+// Back sub area
+scan_sub_area({make_point(-0.5,  -0.45, 0.5), make_point(-0.5,  0.45, 0.5),
+make_point(-0.40, 0.45, 0.5), make_point(-0.40, -0.45, 0.5)});
 
-  // Build and publish octomap
-  build_octomap_from_accumulated_clouds();
-  publishAccumulatedCloud();
+// Build and publish octomap
+build_octomap_from_accumulated_clouds();
+publishAccumulatedCloud();
 
-  // Extract objects from octomap
-  std::vector<DetectedObj> det;
-  extract_objects(*latest_octree_, true, det);
+// Extract objects from octomap
+std::vector<DetectedObj> det;
+extract_objects(*latest_octree_, true, det);
 
-  // Count noughts vs crosses
-  int cnt_nought = 0, cnt_cross = 0;
-  for (auto &d : det) {
-    if (d.category == "object") {
-      if (d.shape == "nought") ++cnt_nought;
-      else if (d.shape == "cross") ++cnt_cross;
-    }
-  }
-  if (cnt_nought + cnt_cross == 0) {
-    ROS_ERROR("No object detected.");
-    return false;
-  }
-
-  // Decide target shape randomly if tie
-  std::string target_shape = (cnt_nought > cnt_cross) ? "nought" :
-                             (cnt_cross > cnt_nought) ? "cross" :
-                             ((std::rand() % 2) ? "nought" : "cross");
-
-  // Find basket and target
-  DetectedObj basket{}, target{};
-  bool basket_ok = false, target_ok = false;
-  for (auto &d : det) {
-    if (!basket_ok && d.category == "basket") {
-      basket = d; basket_ok = true;
-    }
-    if (!target_ok && d.category == "object" && d.shape == target_shape) {
-      target = d; target_ok = true;
-    }
-  }
-  if (!basket_ok || !target_ok) {
-    ROS_ERROR("Basket or target object missing.");
-    return false;
-  }
-
-  go_to_initial_state();
-
-  // Move above target and wait for cloud
-  geometry_msgs::PointStamped obj_pt = make_point(
-      target.centroid.x, target.centroid.y, target.centroid.z);
-  if (!move_to_pose(obj_pt, 0.50, true)) return false;
-  ros::Rate rate(10); int wait=0;
-  while (!cloud_received_ && wait++<50) {
-    ROS_INFO_THROTTLE(1.0, "Waiting for point cloud...");
-    rate.sleep();
-  }
-  if (!cloud_received_) {
-    ROS_ERROR("No point cloud received after arm moved.");
-    return false;
-  }
-
-  // Filter to top layer and by octomap voxels
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr transf(new pcl::PointCloud<pcl::PointXYZRGB>);
-  pcl_ros::transformPointCloud("world", *latest_cloud_rgb, *transf, tf_buffer_);
-  auto filtered = filterByOctomapVoxels(transf, target.voxel_keys, *latest_octree_);
-  publishCloud<pcl::PointXYZRGB>(filtered, "world");
-  ROS_INFO("Filtered cloud published");
-
-  // Compute grasp corner & place point
-  auto [hull2, poly2] = computeConvexHull(filtered);
-  auto corners2 = extract_corner_points(hull2, poly2, 1, "world");
-  auto grasp_pt = computeGraspPoint(target.centroid, corners2, target_shape);
-  auto offset2 = computeOffsetVector(grasp_pt, target.centroid);
-  geometry_msgs::PointStamped bask_pt = make_point(
-      basket.centroid.x, basket.centroid.y, basket.centroid.z);
-  auto place_pt = computeAdjustedPlacementPoint(bask_pt, offset2);
-
-  // Visualize and perform pick-and-place
-  publishConvexHullMarker(corners2, marker_pub_, 0);
-  publishGraspPointMarker(grasp_pt, grasp_point_pub_, 1);
-  publishBasketMarker(bask_pt, 0);
-  double yaw = compute_orientation(hull2, grasp_pt) + compute_yaw_offset(target_shape);
-  ROS_INFO("Place point: (%.3f, %.3f, %.3f)",
-           place_pt.point.x, place_pt.point.y, place_pt.point.z);
-
-  if (!cartesian_grasp_and_place(grasp_pt, place_pt, yaw)) {
-    ROS_ERROR("Pick-place fail.");
-    return false;
-  }
-
-  go_to_initial_state();
-  ROS_INFO("Task-3 done: picked a %s and dropped into basket.",
-           target_shape.c_str());
-  return true;
+// Count noughts vs crosses
+int cnt_nought = 0, cnt_cross = 0;
+for (auto &d : det) {
+if (d.category == "object") {
+if (d.shape == "nought") ++cnt_nought;
+else if (d.shape == "cross") ++cnt_cross;
 }
+}
+if (cnt_nought + cnt_cross == 0) {
+ROS_ERROR("No object detected.");
+return false;
+}
+
+// Decide target shape randomly if tie
+std::string target_shape = (cnt_nought > cnt_cross) ? "nought" :
+         (cnt_cross > cnt_nought) ? "cross" :
+         ((std::rand() % 2) ? "nought" : "cross");
+
+// Compute and set response fields
+response.total_num_shapes = cnt_nought + cnt_cross;
+if (cnt_nought == cnt_cross) {
+response.num_most_common_shape =
+(target_shape == "nought" ? cnt_nought : cnt_cross);
+} else {
+response.num_most_common_shape = std::max(cnt_nought, cnt_cross);
+}
+// Log the computed values for debugging
+ROS_INFO("Total number of shapes: %ld", response.total_num_shapes);
+ROS_INFO("Number of most common shape (%s): %ld",
+target_shape.c_str(), response.num_most_common_shape);
+
+// Find basket and target
+DetectedObj basket{}, target{};
+bool basket_ok = false, target_ok = false;
+for (auto &d : det) {
+if (!basket_ok && d.category == "basket") {
+basket = d; basket_ok = true;
+}
+if (!target_ok && d.category == "object" && d.shape == target_shape) {
+target = d; target_ok = true;
+}
+}
+if (!basket_ok || !target_ok) {
+ROS_ERROR("Basket or target object missing.");
+return false;
+}
+
+go_to_initial_state();
+
+// Move above target and wait for cloud
+geometry_msgs::PointStamped obj_pt = make_point(
+target.centroid.x, target.centroid.y, target.centroid.z);
+if (!move_to_pose(obj_pt, 0.50, true)) return false;
+ros::Rate rate(10); int wait=0;
+while (!cloud_received_ && wait++<50) {
+ROS_INFO_THROTTLE(1.0, "Waiting for point cloud...");
+rate.sleep();
+}
+if (!cloud_received_) {
+ROS_ERROR("No point cloud received after arm moved.");
+return false;
+}
+
+// Filter to top layer and by octomap voxels
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr transf(new pcl::PointCloud<pcl::PointXYZRGB>);
+pcl_ros::transformPointCloud("world", *latest_cloud_rgb, *transf, tf_buffer_);
+auto filtered = filterByOctomapVoxels(transf, target.voxel_keys, *latest_octree_);
+publishCloud<pcl::PointXYZRGB>(filtered, "world");
+ROS_INFO("Filtered cloud published");
+
+// Compute grasp corner & place point
+auto [hull2, poly2] = computeConvexHull(filtered);
+auto corners2 = extract_corner_points(hull2, poly2, 1, "world");
+auto grasp_pt = computeGraspPoint(target.centroid, corners2, target_shape);
+auto offset2 = computeOffsetVector(grasp_pt, target.centroid);
+geometry_msgs::PointStamped bask_pt = make_point(
+basket.centroid.x, basket.centroid.y, basket.centroid.z);
+auto place_pt = computeAdjustedPlacementPoint(bask_pt, offset2);
+
+// Visualize and perform pick-and-place
+publishConvexHullMarker(corners2, marker_pub_, 0);
+publishGraspPointMarker(grasp_pt, grasp_point_pub_, 1);
+publishBasketMarker(bask_pt, 0);
+double yaw = compute_orientation(hull2, grasp_pt) + compute_yaw_offset(target_shape);
+ROS_INFO("Place point: (%.3f, %.3f, %.3f)",
+place_pt.point.x, place_pt.point.y, place_pt.point.z);
+
+if (!cartesian_grasp_and_place(grasp_pt, place_pt, yaw)) {
+ROS_ERROR("Pick-place fail.");
+return false;
+}
+
+go_to_initial_state();
+ROS_INFO("Task-3 done: picked a %s and dropped into basket.",
+target_shape.c_str());
+return true;
+}
+
 
 /**
  * @brief Helper to construct a stamped Point in the world frame.
@@ -383,3 +407,5 @@ void cw2::pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
     }
   }
 }
+
+

@@ -185,94 +185,106 @@ bool cw2::rotate_joint(const std::string& joint_name, double delta_angle_rad)
  * @return false if any step failed.
  */
 bool cw2::cartesian_grasp_and_place(
-    const geometry_msgs::PointStamped& grasp_point,
-    const geometry_msgs::PointStamped& place_point,
-    double rotate_angle)
+  const geometry_msgs::PointStamped& grasp_point,
+  const geometry_msgs::PointStamped& place_point,
+  double rotate_angle)
 {
-  // 1. open gripper
-  move_gripper(0.10);
+// 1. open gripper
+move_gripper(0.10);
 
-  // 2. move above grasp point
-  if (!move_to_pose(grasp_point, 0.15, true)) {
-    ROS_ERROR("Failed to move above the object.");
-    return false;
-  }
+// 2. move above grasp point
+if (!move_to_pose(grasp_point, 0.15, true)) {
+  ROS_ERROR("Failed to move above the object.");
+  return false;
+}
 
-  // 3. rotate end-effector
-  if (!rotate_end_effector(rotate_angle)) {
-    ROS_ERROR("Failed to rotate end-effector.");
-    return false;
-  }
+// 3. rotate end-effector
+if (!rotate_end_effector(rotate_angle)) {
+  ROS_ERROR("Failed to rotate end-effector.");
+  return false;
+}
 
-  // 4. descend to grasp height
-  if (!move_to_pose(grasp_point, 0.07, false)) {
-    ROS_ERROR("Failed to move to grasp height.");
-    return false;
-  }
-
-  // 5. close gripper
-  move_gripper(0.01);
-
-  // 6. record current pose for Cartesian planning
-  geometry_msgs::PoseStamped base_pose_stamped = arm_group_.getCurrentPose();
-  geometry_msgs::Pose base_pose = base_pose_stamped.pose;
-
-  // build waypoints
+// 4. attempt Cartesian straight-down descent to grasp height
+{
+  // build single waypoint: directly above to grasp height
   std::vector<geometry_msgs::Pose> waypoints;
-  geometry_msgs::Pose lift_pose = base_pose;
-  lift_pose.position.z = grasp_point.point.z + 0.5;
-  waypoints.push_back(lift_pose);
+  geometry_msgs::PoseStamped current_pose_stamped = arm_group_.getCurrentPose();
+  geometry_msgs::Pose down_pose = current_pose_stamped.pose;
+  down_pose.position.x = grasp_point.point.x;
+  down_pose.position.y = grasp_point.point.y;
+  down_pose.position.z = grasp_point.point.z + 0.07;
+  waypoints.push_back(down_pose);
 
-  geometry_msgs::Pose move_y_pose = lift_pose;
-  move_y_pose.position.y = place_point.point.y;
-  waypoints.push_back(move_y_pose);
-
-  geometry_msgs::Pose move_x_pose = move_y_pose;
-  move_x_pose.position.x = place_point.point.x;
-  waypoints.push_back(move_x_pose);
-
-  geometry_msgs::Pose lower_pose = move_x_pose;
-  lower_pose.position.z = place_point.point.z + 0.5;
-  waypoints.push_back(lower_pose);
-
-  // 8. compute Cartesian path
-  moveit_msgs::RobotTrajectory trajectory;
-  double fraction = arm_group_.computeCartesianPath(waypoints, 0.01, trajectory, true);
+  moveit_msgs::RobotTrajectory cartesian_trajectory;
+  double fraction = arm_group_.computeCartesianPath(waypoints, 0.01, cartesian_trajectory, true);
   if (fraction >= 0.95) {
-    moveit::planning_interface::MoveGroupInterface::Plan plan;
-    plan.trajectory_ = trajectory;
-    arm_group_.execute(plan);
+    moveit::planning_interface::MoveGroupInterface::Plan cart_plan;
+    cart_plan.trajectory_ = cartesian_trajectory;
+    arm_group_.execute(cart_plan);
   } else {
-    ROS_WARN("Cartesian path planning failed (%.2f%%). Falling back to point-to-point planning.", fraction * 100.0);
-
-    geometry_msgs::PointStamped mid1 = grasp_point;
-    mid1.point.z = grasp_point.point.z + 0.5;
-    geometry_msgs::PointStamped mid2 = place_point;
-    mid2.point.z = place_point.point.z + 0.5;
-
-    // fallback moves
-    if (!move_to_pose(mid1, 0.0, false)) {
-      ROS_ERROR("Fallback move_to_pose: mid1 failed.");
-      return false;
-    }
-    if (!move_to_pose(mid2, 0.0, false)) {
-      ROS_ERROR("Fallback move_to_pose: mid2 failed.");
+    ROS_WARN("Cartesian descent failed (%.2f%%). Falling back to move_to_pose.", fraction * 100.0);
+    // fallback to original point-to-point descent
+    if (!move_to_pose(grasp_point, 0.07, false)) {
+      ROS_ERROR("Fallback move_to_pose to grasp height failed.");
       return false;
     }
   }
+}
 
-  // 9. release object
-  move_gripper(0.10);
+// 5. close gripper
+move_gripper(0.01);
 
-  // 10. lift after placing
-  geometry_msgs::PointStamped lift_after_place = place_point;
-  lift_after_place.point.z = place_point.point.z + 0.5;
-  if (!move_to_pose(lift_after_place, 0.0, false)) {
-    ROS_ERROR("Failed to lift after placing.");
+// 6. record current pose for Cartesian planning
+geometry_msgs::PoseStamped base_pose_stamped = arm_group_.getCurrentPose();
+geometry_msgs::Pose base_pose = base_pose_stamped.pose;
+
+// build waypoints for transfer and placement
+std::vector<geometry_msgs::Pose> waypoints;
+geometry_msgs::Pose lift_pose = base_pose;
+lift_pose.position.z = grasp_point.point.z + 0.4;
+waypoints.push_back(lift_pose);
+
+geometry_msgs::Pose move_y_pose = lift_pose;
+move_y_pose.position.y = place_point.point.y;
+waypoints.push_back(move_y_pose);
+
+geometry_msgs::Pose move_x_pose = move_y_pose;
+move_x_pose.position.x = place_point.point.x;
+waypoints.push_back(move_x_pose);
+
+geometry_msgs::Pose lower_pose = move_x_pose;
+lower_pose.position.z = place_point.point.z + 0.4;
+waypoints.push_back(lower_pose);
+
+// 7. compute Cartesian path for transfer and placement
+moveit_msgs::RobotTrajectory trajectory;
+double fraction = arm_group_.computeCartesianPath(waypoints, 0.01, trajectory, true);
+if (fraction >= 0.95) {
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  plan.trajectory_ = trajectory;
+  arm_group_.execute(plan);
+} else {
+  ROS_WARN("Cartesian path planning failed (%.2f%%). Falling back to point-to-point planning.", fraction * 100.0);
+
+  geometry_msgs::PointStamped mid1 = grasp_point;
+  mid1.point.z = grasp_point.point.z + 0.4;
+  geometry_msgs::PointStamped mid2 = place_point;
+  mid2.point.z = place_point.point.z + 0.4;
+
+  // fallback moves
+  if (!move_to_pose(mid1, 0.0, false)) {
+    ROS_ERROR("Fallback move_to_pose: mid1 failed.");
     return false;
   }
+  if (!move_to_pose(mid2, 0.0, false)) {
+    ROS_ERROR("Fallback move_to_pose: mid2 failed.");
+    return false;
+  }
+}
 
-  return true;
+// 8. release object
+move_gripper(0.10);
+return true;
 }
 
 /**
