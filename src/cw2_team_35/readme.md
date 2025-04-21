@@ -71,7 +71,7 @@ rosservice call /task 3
 ### Please make sure T2_GROUND_PLANE_NOISET would not affect t1 and t3
 1. After calling task 2 service, if task 3 or task 1 service are called, the world_spawner does not delete the previously spawned grass tile. When the T2_GROUND_PLANE_NOISET is activated, this can leads to model interpenetration or jamming with the existing grass tiles and ultimately causes the task to fail. Even if no jamming occurs, the Task 2 scene setup—particularly the height‑perturbed tiles—still skews the passthrough filter in Task 1 and Task 3, causing those subsequent tasks to be judged as failures.
 
-![fk](src/cw2_team_35/figures/bug.jpg)
+![fk](figures/bug.jpg)
 
 ### Gripper problem
 2. Occasionally, when the Panda arm moves along a long curve path, the gripper sometimes opens unexpectedly though it never receives a release command, causing the object to slip out during the motion.
